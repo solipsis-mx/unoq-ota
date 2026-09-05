@@ -1,0 +1,17 @@
+[Unit]
+Description=unoq-ota boot-time MCU recovery
+DefaultDependencies=no
+After=local-fs.target
+Before=unoq-ota.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/unoq-ota reconcile
+RemainAfterExit=yes
+# Runs as root so it can stop arduino-router without sudo. That unit toggles
+# GPIO 38 -- the SWD reset line -- in its ExecStopPost and is Restart=always,
+# so a restart landing mid-erase would assert reset on the target.
+User=root
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,14 @@
+[Unit]
+Description=unoq-ota update agent
+After=network-online.target unoq-ota-reconcile.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/unoq-ota run
+Restart=always
+RestartSec=30
+User=root
+
+[Install]
+WantedBy=multi-user.target
