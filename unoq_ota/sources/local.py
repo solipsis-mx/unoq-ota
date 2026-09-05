@@ -28,11 +28,33 @@ class LocalFileSource:
             manifest = json.loads(raw)
             version = str(manifest["version"])
             sequence = int(manifest["sequence"])
-        except (OSError, ValueError, KeyError, TypeError) as exc:
+        except Exception as exc:
+            # Broad on purpose: `manifest.json` is attacker-influenced content
+            # (the design treats every source as untrusted), and malformed
+            # content can trigger failure modes far outside the "flaky disk"
+            # tuple this used to be -- e.g. a pathologically nested JSON array
+            # blows the interpreter's recursion limit and raises
+            # RecursionError, a RuntimeError subclass. check() must never
+            # raise, so nothing here is allowed to escape uncaught.
             log.warning("ignoring unreadable manifest at %s: %s", path, exc)
             return None
 
-        if self._poisoned(version):
+        # The poison-list predicate is caller-supplied and in practice reads
+        # persisted state from disk -- exactly the kind of I/O the block
+        # above is guarded against. Give it its own try/except (rather than
+        # folding it into the block above) so a poison-list failure is
+        # logged distinctly from a malformed manifest, which matters for
+        # triage: this predicate is the load-bearing guard against a
+        # flash -> fail health -> roll back -> re-offer loop, so an operator
+        # needs to be able to tell "the manifest was garbage" apart from
+        # "the poison list itself is broken" at a glance.
+        try:
+            poisoned = self._poisoned(version)
+        except Exception as exc:
+            log.warning("poison-list check failed for version %s: %s", version, exc)
+            return None
+
+        if poisoned:
             log.info("skipping poisoned version %s", version)
             return None
 

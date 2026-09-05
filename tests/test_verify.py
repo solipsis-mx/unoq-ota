@@ -161,20 +161,42 @@ def test_verify_manifest_passes_inside_its_window(keypair):
     verify_manifest(manifest, public_keys, last_sequence=0, now=now)
 
 
-def test_naive_expired_timestamp_is_treated_as_utc_and_rejected():
-    # A1: a naive timestamp (no "Z", no offset) must not escape as a bare
-    # TypeError from comparing naive vs. aware datetimes. This module treats
-    # a naive timestamp as UTC, consistent with the "Z" suffix convention.
-    now = datetime(2026, 6, 1, tzinfo=timezone.utc)
-    manifest = {"sequence": 1, "expires": "2026-01-01T00:00:00"}
+def test_naive_expires_timestamp_is_rejected():
+    # Reversal of the earlier "normalise to UTC" decision: a signer in, say,
+    # UTC+5:30 who writes an offset-less local value meaning "expire 18:30
+    # UTC" would otherwise get a manifest that keeps verifying for 5.5 hours
+    # past their intended deadline (up to ~14h for far-east zones). Since
+    # `expires` is the emergency-revocation mechanism, guessing UTC is the
+    # unsafe direction -- so a naive timestamp must raise, not be assumed.
+    manifest = {"sequence": 1, "expires": "2026-06-02T00:00:00"}
+
+    with pytest.raises(VerificationError, match="UTC offset"):
+        verify_window(manifest)
+
+
+def test_naive_not_before_timestamp_is_rejected():
+    manifest = {"sequence": 1, "not_before": "2026-06-02T00:00:00"}
+
+    with pytest.raises(VerificationError, match="UTC offset"):
+        verify_window(manifest)
+
+
+def test_offset_qualified_expired_timestamp_is_still_rejected():
+    # A non-UTC but explicit offset must be honoured, not just "Z": this
+    # instant is 2026-06-01T18:30:00Z, already in the past relative to `now`.
+    now = datetime(2026, 6, 2, 12, 0, tzinfo=timezone.utc)
+    manifest = {"sequence": 1, "expires": "2026-06-02T00:00:00+05:30"}
 
     with pytest.raises(VerificationError, match="expired"):
         verify_window(manifest, now=now)
 
 
-def test_naive_future_timestamp_is_treated_as_utc_and_passes():
-    now = datetime(2026, 1, 1, tzinfo=timezone.utc)
-    manifest = {"sequence": 1, "expires": "2026-06-01T00:00:00"}
+def test_offset_qualified_timestamp_inside_window_still_passes():
+    # Same instant as above (2026-06-01T18:30:00Z), but `now` is earlier --
+    # the explicit offset must be converted and compared correctly, not
+    # rejected just for being non-UTC.
+    now = datetime(2026, 6, 1, 12, 0, tzinfo=timezone.utc)
+    manifest = {"sequence": 1, "expires": "2026-06-02T00:00:00+05:30"}
 
     verify_window(manifest, now=now)
 
@@ -399,6 +421,18 @@ def test_float_sequence_raises_verification_error():
 def test_absent_sequence_raises_verification_error():
     with pytest.raises(VerificationError, match="sequence"):
         verify_sequence({}, last_sequence=0)
+
+
+def test_verify_digest_rejects_a_non_string_expected_sha256(tmp_path):
+    # The docstring promises every public function raises only
+    # VerificationError, and explicitly invites direct calls to this one --
+    # `.lower()` on a non-str expected_sha256 must not escape as a bare
+    # AttributeError.
+    path = tmp_path / "a.bin"
+    path.write_bytes(b"hello")
+
+    with pytest.raises(VerificationError):
+        verify_digest(path, 12345)
 
 
 def test_verify_digest_on_missing_file_raises_verification_error(tmp_path):

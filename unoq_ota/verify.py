@@ -18,6 +18,13 @@ after every restart turns a clean rejection into an infinite crash loop.
 The original exception, when there is one, is always chained with `from`
 so the failure stays diagnosable.
 
+`not_before` and `expires` timestamps must carry an explicit UTC offset
+("Z" or "+HH:MM"/"-HH:MM"); a timezone-naive timestamp raises
+`VerificationError` rather than being assumed to mean UTC, because `expires`
+is the emergency-revocation mechanism and assuming UTC is the direction that
+can silently widen a signer's intended validity window. See
+`_parse_timestamp`.
+
 That guarantee covers the manifest and the artifact bytes -- data that
 arrives over the wire and must be treated as hostile. It does not extend to
 `public_keys`, which comes from the caller's own trusted `load_keyring()`
@@ -110,17 +117,34 @@ def verify_sequence(manifest: dict, last_sequence: int) -> None:
 
 
 def _parse_timestamp(raw: str, field: str) -> datetime:
+    """Parse an ISO-8601 timestamp, requiring an explicit UTC offset.
+
+    A timezone-naive timestamp (no "Z", no "+HH:MM") is rejected rather than
+    assumed to be UTC. `expires`/`not_before` are the emergency-revocation
+    mechanism, and "assume UTC" is the unsafe direction to guess wrong in: a
+    signer east of UTC (e.g. UTC+5:30) who means a naive value as their own
+    local time gets a manifest that keeps verifying for up to ~14 hours past
+    the deadline they intended (the exact offset), because assuming their
+    local clock reading is already UTC pushes the assumed expiry later than
+    they meant. A signer west of UTC gets the opposite error -- the assumed
+    expiry lands earlier than intended, which only narrows their window
+    (fail-safe, not a correctness problem). Since this routine can't tell
+    which the caller meant, it declines to guess and raises instead -- the
+    failure is loud, and the device just keeps running its current firmware
+    until the manifest is fixed to carry an offset.
+    """
     text = raw[:-1] + "+00:00" if raw.endswith("Z") else raw
     try:
         moment = datetime.fromisoformat(text)
     except ValueError as exc:
         raise VerificationError(f"{field} is not a valid timestamp: {raw!r}") from exc
     if moment.tzinfo is None:
-        # A timezone-naive timestamp (a signing tool that dropped the "Z" or
-        # an explicit offset) is treated as UTC, matching the convention this
-        # format already uses for the "Z" suffix, rather than raising or
-        # comparing naive-vs-aware datetimes (which raises TypeError).
-        moment = moment.replace(tzinfo=timezone.utc)
+        raise VerificationError(
+            f"{field} has no UTC offset ({raw!r}); timestamps must be "
+            "explicitly qualified (end with 'Z' or an explicit +HH:MM/-HH:MM "
+            "offset) -- a naive timestamp is ambiguous about the signer's "
+            "local time and cannot be safely assumed to mean UTC"
+        )
     return moment
 
 
@@ -144,6 +168,11 @@ def verify_window(manifest: dict, now: Optional[datetime] = None) -> None:
 
 
 def verify_digest(path: Path, expected_sha256: str) -> None:
+    if not isinstance(expected_sha256, str):
+        raise VerificationError(
+            f"expected_sha256 must be a string, got {type(expected_sha256).__name__}"
+        )
+
     try:
         data = Path(path).read_bytes()
     except OSError as exc:

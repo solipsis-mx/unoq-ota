@@ -93,6 +93,34 @@ def test_check_returns_none_when_the_manifest_read_raises_permission_error(tmp_p
     assert LocalFileSource(tmp_path).check() is None
 
 
+def test_check_returns_none_on_deeply_nested_json_that_would_recursionerror(tmp_path):
+    # Sibling of B1: a RecursionError is a RuntimeError subclass, not in the
+    # old (OSError, ValueError, KeyError, TypeError) tuple, and can be
+    # triggered by attacker-influenced content alone -- no flaky disk needed.
+    # This is the more relevant threat model, since the design treats every
+    # source as untrusted.
+    nested = ("[" * 200000) + ("]" * 200000)
+    (tmp_path / "manifest.json").write_text(nested)
+
+    assert LocalFileSource(tmp_path).check() is None
+
+
+def test_local_check_returns_none_when_poisoned_predicate_raises(tmp_path):
+    # The poison list is caller-supplied and in practice reads persisted
+    # state from disk -- exactly the I/O the rest of check() is guarded
+    # against. It is also the load-bearing guard against a
+    # flash -> fail health -> roll back -> re-offer loop, so a failure in it
+    # must degrade like any other transient failure, not raise out of check().
+    (tmp_path / "manifest.json").write_text(json.dumps(_manifest()))
+
+    def _explodes(version):
+        raise OSError("poison-list store unavailable")
+
+    source = LocalFileSource(tmp_path, poisoned=_explodes)
+
+    assert source.check() is None
+
+
 # ---------------------------------------------------------------------------
 # Fakes for HttpManifestSource / download -- no real network.
 # ---------------------------------------------------------------------------
@@ -156,6 +184,23 @@ def test_construction_rejects_a_non_numeric_jitter():
         HttpManifestSource("http://example.invalid/manifest.json", jitter_s="soon")
 
 
+def test_construction_rejects_an_infinite_jitter():
+    # float('inf') passes a plain isinstance + `< 0` check, and
+    # random.uniform(0, inf) doesn't raise -- only time.sleep(inf) does, and
+    # only once check() actually gets there. Left unguarded, the source
+    # would silently stop returning updates forever, logging the same
+    # "manifest fetch failed" message as an ordinary network outage.
+    with pytest.raises(ValueError, match="jitter"):
+        HttpManifestSource("http://example.invalid/manifest.json", jitter_s=float("inf"))
+
+
+def test_construction_rejects_a_nan_jitter():
+    # NaN compares False to everything, so `jitter_s < 0` is also False --
+    # same silent-death failure mode as infinity.
+    with pytest.raises(ValueError, match="jitter"):
+        HttpManifestSource("http://example.invalid/manifest.json", jitter_s=float("nan"))
+
+
 def test_check_survives_a_jitter_value_gone_bad_after_construction(monkeypatch):
     # Defence in depth: even if jitter_s is mutated to something nonsensical
     # after construction, check() must degrade like any other transient
@@ -165,6 +210,27 @@ def test_check_survives_a_jitter_value_gone_bad_after_construction(monkeypatch):
     )
     source = HttpManifestSource("http://example.invalid/manifest.json", session=session, jitter_s=0)
     source.jitter_s = -5
+
+    assert source.check() is None
+
+
+def test_http_check_returns_none_when_poisoned_predicate_raises():
+    # Same guard as LocalFileSource: the poison-list call is caller-supplied
+    # state (typically read from disk) and must not be able to make check()
+    # raise, in this source too.
+    session = _FakeManifestSession(
+        _FakeManifestResponse(content=json.dumps(_manifest()).encode())
+    )
+
+    def _explodes(version):
+        raise OSError("poison-list store unavailable")
+
+    source = HttpManifestSource(
+        "http://example.invalid/manifest.json",
+        session=session,
+        jitter_s=0,
+        poisoned=_explodes,
+    )
 
     assert source.check() is None
 
@@ -248,3 +314,22 @@ def test_download_removes_partial_file_on_bad_status(tmp_path):
         download("http://example.invalid/artifact.bin", dest, session=session)
 
     assert not dest.exists()
+
+
+def test_download_propagates_original_exception_when_unlink_also_fails(tmp_path, monkeypatch):
+    # The cleanup unlink must never be able to supersede the original
+    # failure. Here the original cause is a ConnectionError from a dropped
+    # connection, and Path.unlink is made to fail too (e.g. a PermissionError
+    # on a locked-down directory) -- the ConnectionError must still be what
+    # the caller sees, not the PermissionError from cleanup.
+    dest = tmp_path / "artifact.bin"
+    chunks = [b"a" * 10, ConnectionError("connection dropped")]
+    session = _FakeStreamSession(_FakeStreamResponse(chunks))
+
+    def _raise(self, missing_ok=False):
+        raise PermissionError("cannot remove partial file")
+
+    monkeypatch.setattr(Path, "unlink", _raise)
+
+    with pytest.raises(ConnectionError):
+        download("http://example.invalid/artifact.bin", dest, session=session)

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import random
 import time
 from pathlib import Path
@@ -43,15 +44,40 @@ def download(url: str, dest: Path, session=None, max_bytes: int = 4_000_000) -> 
                         raise ValueError(f"artifact exceeded {max_bytes} bytes")
                     handle.write(chunk)
     except Exception:
-        dest.unlink(missing_ok=True)
+        # The cleanup unlink must never be able to supersede the original
+        # failure (a ConnectionError, a size-cap ValueError, ...): a caller
+        # catching a specific exception type needs to see *that* type, not
+        # whatever unlink() happened to raise (e.g. PermissionError on a
+        # locked-down directory). Guard it in its own except so a cleanup
+        # failure can only be logged, never propagate in place of the cause.
+        try:
+            dest.unlink(missing_ok=True)
+        except OSError as cleanup_exc:
+            log.warning(
+                "failed to remove partial download at %s: %s", dest, cleanup_exc
+            )
         raise
     return dest
 
 
 class HttpManifestSource:
     def __init__(self, manifest_url: str, poisoned=None, session=None, jitter_s: float = 30.0):
-        if not isinstance(jitter_s, (int, float)) or isinstance(jitter_s, bool) or jitter_s < 0:
-            raise ValueError(f"jitter_s must be a non-negative number, got {jitter_s!r}")
+        if (
+            not isinstance(jitter_s, (int, float))
+            or isinstance(jitter_s, bool)
+            or not math.isfinite(jitter_s)
+            or jitter_s < 0
+        ):
+            # inf/nan both pass a plain `isinstance` + `< 0` check (NaN
+            # compares False either way), and `random.uniform(0, inf/nan)`
+            # doesn't raise -- it's `time.sleep` fed the result that raises,
+            # which then reads on every poll as an ordinary network-fetch
+            # failure ("manifest fetch failed"). That makes a permanently
+            # dead device indistinguishable from a flaky link. Reject at
+            # construction, loudly, where the misconfiguration was made.
+            raise ValueError(
+                f"jitter_s must be a finite non-negative number, got {jitter_s!r}"
+            )
         self.manifest_url = manifest_url
         self._poisoned = poisoned or (lambda version: False)
         self._session = session or requests
@@ -61,6 +87,16 @@ class HttpManifestSource:
         try:
             if self.jitter_s:
                 time.sleep(random.uniform(0, self.jitter_s))
+        except Exception as exc:
+            # Kept separate from the fetch below so a jitter misconfiguration
+            # (e.g. jitter_s mutated to something nonsensical after
+            # construction) is never reported under the same "manifest fetch
+            # failed" message as a genuine network outage -- the two need
+            # different responses from whoever is triaging.
+            log.warning("jitter sleep failed: %s", exc)
+            return None
+
+        try:
             response = self._session.get(self.manifest_url, timeout=DEFAULT_TIMEOUT_S)
             response.raise_for_status()
             raw = response.content
@@ -71,7 +107,18 @@ class HttpManifestSource:
             log.warning("manifest fetch failed: %s", exc)
             return None
 
-        if self._poisoned(version):
+        # See unoq_ota/sources/local.py's check() for why this is guarded
+        # separately from the fetch above: `poisoned` is caller-supplied,
+        # typically backed by persisted state on disk, and is the
+        # load-bearing guard against a flash -> fail health -> roll back ->
+        # re-offer loop -- it must not be able to make check() raise.
+        try:
+            poisoned = self._poisoned(version)
+        except Exception as exc:
+            log.warning("poison-list check failed for version %s: %s", version, exc)
+            return None
+
+        if poisoned:
             return None
 
         return Update(
