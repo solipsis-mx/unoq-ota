@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
-import json
+from datetime import datetime, timedelta, timezone
 
 import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
@@ -77,6 +77,134 @@ def test_accepts_a_newer_sequence():
     verify_sequence({"sequence": 10}, last_sequence=9)
 
 
+def test_string_last_sequence_raises_verification_error():
+    # last_sequence comes from on-device state (already sanitized to a real
+    # int by unoq_ota.state) and must be held to the same standard as the
+    # manifest's own `sequence` field -- no int()-coercion of strings/bools.
+    with pytest.raises(VerificationError, match="last_sequence"):
+        verify_sequence({"sequence": 10}, last_sequence="9")
+
+
+def test_bool_last_sequence_raises_verification_error():
+    with pytest.raises(VerificationError, match="last_sequence"):
+        verify_sequence({"sequence": 10}, last_sequence=True)
+
+
+def test_float_last_sequence_raises_verification_error():
+    with pytest.raises(VerificationError, match="last_sequence"):
+        verify_sequence({"sequence": 10}, last_sequence=9.9)
+
+
+# ---------------------------------------------------------------------------
+# Finding 3 (A1-A3): verify_window's malformed-input handling had zero
+# enforcement coverage. These tests exercise real expiry/not-before rejection
+# (including through verify_manifest's `now` parameter), naive-timestamp
+# handling, and the falsy-but-present fields that used to fail open.
+# ---------------------------------------------------------------------------
+
+
+def test_expired_manifest_is_rejected():
+    now = datetime(2026, 6, 1, tzinfo=timezone.utc)
+    expires = now - timedelta(days=1)
+    manifest = {"sequence": 1, "expires": expires.isoformat()}
+
+    with pytest.raises(VerificationError, match="expired"):
+        verify_window(manifest, now=now)
+
+
+def test_future_not_before_is_rejected():
+    now = datetime(2026, 6, 1, tzinfo=timezone.utc)
+    not_before = now + timedelta(days=1)
+    manifest = {"sequence": 1, "not_before": not_before.isoformat()}
+
+    with pytest.raises(VerificationError, match="not valid until"):
+        verify_window(manifest, now=now)
+
+
+def test_manifest_inside_its_window_passes():
+    now = datetime(2026, 6, 1, tzinfo=timezone.utc)
+    manifest = {
+        "sequence": 1,
+        "not_before": (now - timedelta(days=1)).isoformat(),
+        "expires": (now + timedelta(days=1)).isoformat(),
+    }
+
+    verify_window(manifest, now=now)
+
+
+def test_manifest_with_neither_window_field_passes():
+    verify_window({"sequence": 1})
+
+
+def test_verify_manifest_propagates_a_window_rejection(keypair):
+    # Exercises verify_manifest's own `now` parameter, not just verify_window
+    # called directly -- the gap the review flagged as completely untested.
+    key, public_keys = keypair
+    now = datetime(2026, 6, 1, tzinfo=timezone.utc)
+    expires = now - timedelta(days=1)
+    manifest = _manifest(sequence=1)
+    manifest["expires"] = expires.isoformat()
+    manifest = _signed(manifest, key)
+
+    with pytest.raises(VerificationError, match="expired"):
+        verify_manifest(manifest, public_keys, last_sequence=0, now=now)
+
+
+def test_verify_manifest_passes_inside_its_window(keypair):
+    key, public_keys = keypair
+    now = datetime(2026, 6, 1, tzinfo=timezone.utc)
+    manifest = _manifest(sequence=1)
+    manifest["not_before"] = (now - timedelta(days=1)).isoformat()
+    manifest["expires"] = (now + timedelta(days=1)).isoformat()
+    manifest = _signed(manifest, key)
+
+    verify_manifest(manifest, public_keys, last_sequence=0, now=now)
+
+
+def test_naive_expired_timestamp_is_treated_as_utc_and_rejected():
+    # A1: a naive timestamp (no "Z", no offset) must not escape as a bare
+    # TypeError from comparing naive vs. aware datetimes. This module treats
+    # a naive timestamp as UTC, consistent with the "Z" suffix convention.
+    now = datetime(2026, 6, 1, tzinfo=timezone.utc)
+    manifest = {"sequence": 1, "expires": "2026-01-01T00:00:00"}
+
+    with pytest.raises(VerificationError, match="expired"):
+        verify_window(manifest, now=now)
+
+
+def test_naive_future_timestamp_is_treated_as_utc_and_passes():
+    now = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    manifest = {"sequence": 1, "expires": "2026-06-01T00:00:00"}
+
+    verify_window(manifest, now=now)
+
+
+@pytest.mark.parametrize("falsy", ["", 0, [], {}, False])
+def test_falsy_but_present_expires_raises_rather_than_passing_silently(falsy):
+    # A2: `if not raw: continue` used to treat these as "no window given"
+    # and silently disable the expiry check.
+    manifest = {"sequence": 1, "expires": falsy}
+
+    with pytest.raises(VerificationError):
+        verify_window(manifest)
+
+
+@pytest.mark.parametrize("falsy", ["", 0, [], {}, False])
+def test_falsy_but_present_not_before_raises_rather_than_passing_silently(falsy):
+    manifest = {"sequence": 1, "not_before": falsy}
+
+    with pytest.raises(VerificationError):
+        verify_window(manifest)
+
+
+@pytest.mark.parametrize("field", ["not_before", "expires"])
+def test_absent_window_field_is_not_an_error(field):
+    # Absent (key missing, or explicitly None) is the real "no window given"
+    # case and must keep passing.
+    verify_window({"sequence": 1, field: None})
+    verify_window({"sequence": 1})
+
+
 def test_verifies_a_file_digest(tmp_path):
     path = tmp_path / "a.bin"
     path.write_bytes(b"hello")
@@ -89,6 +217,14 @@ def test_rejects_a_bad_digest(tmp_path):
 
     with pytest.raises(VerificationError, match="sha256"):
         verify_digest(path, "0" * 64)
+
+
+def test_verify_digest_is_case_insensitive(tmp_path):
+    # An uppercase digest is a confusing interop trap, not a security issue --
+    # it must still match rather than failing closed on casing alone.
+    path = tmp_path / "a.bin"
+    path.write_bytes(b"hello")
+    verify_digest(path, hashlib.sha256(b"hello").hexdigest().upper())
 
 
 def _manifest(sequence=1, artifact_sha256=None):
@@ -125,7 +261,7 @@ def test_verify_manifest_with_artifact_path_rejects_mismatched_bytes(keypair, tm
         verify_manifest(manifest, public_keys, last_sequence=0, artifact_path=artifact_path)
 
 
-def test_verify_manifest_without_artifact_path_still_runs_signature_window_sequence(keypair):
+def test_verify_manifest_without_artifact_path_still_runs_signature_and_sequence(keypair):
     key, public_keys = keypair
 
     # A tampered payload is still caught by the signature check alone.

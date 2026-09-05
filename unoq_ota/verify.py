@@ -8,15 +8,23 @@ signed once and later found to be bad -- which is why sequence is enforced
 on-device rather than trusted from the server.
 
 Every public function here raises only `VerificationError` for malformed
-input (bad shapes, wrong types, missing files) as well as for genuine
-verification failures. This matters beyond tidiness: a caller -- the OTA
-agent included -- catches `VerificationError` to mark an update rejected
-and poison its version. Anything that instead escapes as a bare
-`AttributeError`/`TypeError`/`KeyError`/`OSError` skips that handling
+*manifest and artifact* input (bad shapes, wrong types, missing files) as
+well as for genuine verification failures. This matters beyond tidiness: a
+caller -- the OTA agent included -- catches `VerificationError` to mark an
+update rejected and poison its version. Anything that instead escapes as a
+bare `AttributeError`/`TypeError`/`KeyError`/`OSError` skips that handling
 entirely, and a supervised process that retries the same malformed manifest
 after every restart turns a clean rejection into an infinite crash loop.
 The original exception, when there is one, is always chained with `from`
 so the failure stays diagnosable.
+
+That guarantee covers the manifest and the artifact bytes -- data that
+arrives over the wire and must be treated as hostile. It does not extend to
+`public_keys`, which comes from the caller's own trusted `load_keyring()`
+(itself returning `{}` on failure): a non-dict `public_keys` is a
+programming error in the caller, not malformed input, and is left to raise
+its natural `AttributeError` rather than being hidden behind
+`VerificationError`.
 """
 
 from __future__ import annotations
@@ -27,6 +35,7 @@ import hashlib
 import json
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Optional
 
 from cryptography.exceptions import InvalidSignature
 
@@ -89,10 +98,9 @@ def verify_sequence(manifest: dict, last_sequence: int) -> None:
     if not isinstance(sequence, int) or isinstance(sequence, bool):
         raise VerificationError(f"manifest has no usable sequence: {sequence!r}")
 
-    try:
-        baseline = int(last_sequence)
-    except (TypeError, ValueError) as exc:
-        raise VerificationError(f"last_sequence is not usable: {last_sequence!r}") from exc
+    if not isinstance(last_sequence, int) or isinstance(last_sequence, bool):
+        raise VerificationError(f"last_sequence is not usable: {last_sequence!r}")
+    baseline = last_sequence
 
     if sequence <= baseline:
         raise VerificationError(
@@ -101,22 +109,34 @@ def verify_sequence(manifest: dict, last_sequence: int) -> None:
         )
 
 
-def verify_window(manifest: dict, now: datetime = None) -> None:
+def _parse_timestamp(raw: str, field: str) -> datetime:
+    text = raw[:-1] + "+00:00" if raw.endswith("Z") else raw
+    try:
+        moment = datetime.fromisoformat(text)
+    except ValueError as exc:
+        raise VerificationError(f"{field} is not a valid timestamp: {raw!r}") from exc
+    if moment.tzinfo is None:
+        # A timezone-naive timestamp (a signing tool that dropped the "Z" or
+        # an explicit offset) is treated as UTC, matching the convention this
+        # format already uses for the "Z" suffix, rather than raising or
+        # comparing naive-vs-aware datetimes (which raises TypeError).
+        moment = moment.replace(tzinfo=timezone.utc)
+    return moment
+
+
+def verify_window(manifest: dict, now: Optional[datetime] = None) -> None:
     manifest = _require_dict(manifest, "manifest")
     now = now or datetime.now(timezone.utc)
 
     for field, compare in (("not_before", "before"), ("expires", "after")):
-        raw = manifest.get(field)
-        if not raw:
+        if field not in manifest or manifest[field] is None:
             continue
+        raw = manifest[field]
         if not isinstance(raw, str):
             raise VerificationError(
                 f"{field} must be a string timestamp, got {type(raw).__name__}"
             )
-        try:
-            moment = datetime.fromisoformat(raw.replace("Z", "+00:00"))
-        except ValueError as exc:
-            raise VerificationError(f"{field} is not a valid timestamp: {raw!r}") from exc
+        moment = _parse_timestamp(raw, field)
         if compare == "before" and now < moment:
             raise VerificationError(f"manifest is not valid until {raw}")
         if compare == "after" and now > moment:
@@ -130,7 +150,7 @@ def verify_digest(path: Path, expected_sha256: str) -> None:
         raise VerificationError(f"could not read artifact at {path}: {exc}") from exc
 
     digest = hashlib.sha256(data).hexdigest()
-    if digest != expected_sha256:
+    if digest.lower() != expected_sha256.lower():
         raise VerificationError(
             f"sha256 mismatch: expected {expected_sha256}, got {digest}"
         )
@@ -140,8 +160,8 @@ def verify_manifest(
     manifest: dict,
     public_keys: dict,
     last_sequence: int,
-    now: datetime = None,
-    artifact_path: Path = None,
+    now: Optional[datetime] = None,
+    artifact_path: Optional[Path] = None,
 ) -> None:
     """Run the manifest checks, in fixed order: signature -> validity window
     -> sequence -> digest.
