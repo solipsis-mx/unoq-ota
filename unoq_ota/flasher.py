@@ -20,15 +20,20 @@ Two details are load-bearing rather than cosmetic:
 
 from __future__ import annotations
 
+import contextlib
+import logging
 import subprocess
 from pathlib import Path
 
 from unoq_ota.artifact import SketchArtifact, SketchHeader, parse_header
 from unoq_ota.board import FlashTarget
 
+log = logging.getLogger(__name__)
+
 OPENOCD_BIN = "/opt/openocd/bin/openocd"
 OPENOCD_ROOT = "/opt/openocd"
 OPENOCD_CFG = "openocd_gpiod.cfg"
+ROUTER_UNIT = "arduino-router"
 
 # reset_config is a configuration command, not a target operation -- it
 # cannot itself throw from an unresponsive target, so it stays outside the
@@ -181,3 +186,48 @@ def read_resident_header(address: int, timeout_s: float = 60.0) -> SketchHeader:
     tmp = Path("/tmp/unoq-ota-resident-header.bin")
     read_partition(tmp, address, 16, timeout_s=timeout_s)
     return parse_header(tmp.read_bytes())
+
+
+@contextlib.contextmanager
+def router_stopped(run=subprocess.run, unit: str = ROUTER_UNIT):
+    """Stop arduino-router for the duration of a flash, then restore it.
+
+    That unit toggles GPIO 38 -- the SWD reset line -- in its ExecStopPost,
+    and is Restart=always. If it restarts while we are erasing, systemd
+    asserts reset on the target mid-write. Stopping it deliberately means the
+    reset happens at a moment we choose, before OpenOCD's own preamble does
+    its own reset/halt -- an extra, harmless assertion of a line that is
+    about to be driven again anyway. Restart=always does not undo this: that
+    policy governs the unit exiting on its own, not an administrative
+    `systemctl stop`, so the unit stays down for the whole write window
+    without systemd fighting us over it.
+
+    Restarting is in a finally block: leaving the router down would cost the
+    board its host communication, which is worse than a failed update.
+
+    `run()` itself, not just its return code, is guarded: on a host with no
+    `systemctl` at all (missing binary, broken PATH, a bench Mac) `run()`
+    raises OSError before returning anything. Only the return-code failure
+    was handled below originally, which is exactly the kind of asymmetric
+    guard that turns "flashing anyway" into an uncaught crash on the one
+    class of host most likely to hit it.
+    """
+    stopped = False
+    try:
+        try:
+            result = run(["systemctl", "stop", unit], capture_output=True, text=True)
+        except OSError as exc:
+            log.warning(
+                "could not run systemctl to stop %s: %s; flashing anyway", unit, exc
+            )
+        else:
+            stopped = getattr(result, "returncode", 1) == 0
+            if not stopped:
+                log.warning("could not stop %s; flashing anyway", unit)
+        yield stopped
+    finally:
+        if stopped:
+            try:
+                run(["systemctl", "start", unit], capture_output=True, text=True)
+            except OSError as exc:
+                log.warning("could not restart %s after flashing: %s", unit, exc)

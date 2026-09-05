@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import contextlib
 import hashlib
 import os
 from pathlib import Path
@@ -13,11 +14,25 @@ from unoq_ota import agent as agent_module
 from unoq_ota.agent import Agent
 from unoq_ota.artifact import load_artifact
 from unoq_ota.board import FlashTarget
+from unoq_ota.flasher import FlashError
 from unoq_ota.interfaces import Status, Update
+from unoq_ota.preflight import PreflightError
 from unoq_ota.state import MAX_ATTEMPTS, Phase, StateStore
 from unoq_ota.verify import VerificationError, canonical_bytes
 
 TARGET = FlashTarget(address=0x08100000, max_size=786432, core_version="1.0.0")
+
+
+@contextlib.contextmanager
+def _fake_router_stopped():
+    """A no-op stand-in for `unoq_ota.flasher.router_stopped`.
+
+    The real one shells out to `systemctl`. Every test in this file that
+    reaches `run_once`'s flash step must use this instead -- never the real
+    thing -- so nothing here ever risks touching a real systemd, on this
+    machine or, worse, on the actual board.
+    """
+    yield True
 
 
 class StubSource:
@@ -118,6 +133,7 @@ def _agent(tmp_path, source, gate, health, flashed=None, verify_ok=True, health_
         flash=flash,
         fetch=fetch,
         verify=verify,
+        router_stopped=_fake_router_stopped,
     )
 
 
@@ -303,6 +319,7 @@ def test_rollback_skips_a_candidate_that_raises_an_unexpected_error(tmp_path):
         load=load,
         fetch=fetch,
         verify=verify,
+        router_stopped=_fake_router_stopped,
     )
 
     assert agent.run_once() == Phase.ROLLED_BACK
@@ -603,3 +620,165 @@ def test_constructing_an_agent_without_fetch_raises(tmp_path):
             health_factory=lambda version: StubHealth([]),
             target=TARGET,
         )
+
+
+# ---------------------------------------------------------------------------
+# Task 11: preflight guards wired into run_once (clock, disk, router)
+# ---------------------------------------------------------------------------
+
+
+def test_clock_guard_defers_without_counting_an_attempt_or_poisoning(tmp_path, monkeypatch):
+    import unoq_ota.preflight as preflight_module
+
+    def fail_clock(now=None, floor_year=2020):
+        raise PreflightError("system clock reads 1980-01-06; deferring")
+
+    monkeypatch.setattr(preflight_module, "check_clock", fail_clock)
+
+    flashed = []
+    source = StubSource(_update())
+    agent = _agent(tmp_path, source, StubGate(), StubHealth([]), flashed)
+
+    assert agent.run_once() == Phase.IDLE
+    assert flashed == []
+    assert any(status == Status.WAITING_FOR_GATE for status, _ in source.reports)
+    store = StateStore(tmp_path / "state.json")
+    assert not store.is_poisoned("1.0.0")
+    assert store.attempts_for("1.0.0") == 0
+
+
+def test_disk_guard_defers_without_counting_an_attempt_or_poisoning(tmp_path, monkeypatch):
+    import unoq_ota.preflight as preflight_module
+
+    def fail_disk(path, needed_bytes, margin_bytes=50_000_000):
+        raise PreflightError("insufficient disk space")
+
+    monkeypatch.setattr(preflight_module, "check_disk_space", fail_disk)
+
+    flashed = []
+    source = StubSource(_update())
+    agent = _agent(tmp_path, source, StubGate(), StubHealth([]), flashed)
+
+    assert agent.run_once() == Phase.IDLE
+    assert flashed == []
+    assert any(status == Status.WAITING_FOR_GATE for status, _ in source.reports)
+    store = StateStore(tmp_path / "state.json")
+    assert not store.is_poisoned("1.0.0")
+    assert store.attempts_for("1.0.0") == 0
+
+
+def test_preflight_guard_leaves_state_consistent_with_its_return_value(tmp_path, monkeypatch):
+    """The reference wiring returns Phase.IDLE from the clock/disk guard
+    without persisting it, which can disagree with whatever phase state.json
+    was left holding by an earlier, unrelated cycle -- exactly the kind of
+    inconsistent guard the task warns about. `run_once`'s return value must
+    match what it left in the store.
+    """
+    import unoq_ota.preflight as preflight_module
+
+    def fail_clock(now=None, floor_year=2020):
+        raise PreflightError("system clock reads 1980-01-06; deferring")
+
+    monkeypatch.setattr(preflight_module, "check_clock", fail_clock)
+
+    store = StateStore(tmp_path / "state.json")
+    state = store.load()
+    state.phase = Phase.STAGED
+    state.version = "0.0.1-stale"
+    store.save(state)
+
+    agent = _agent(tmp_path, StubSource(_update()), StubGate(), StubHealth([]))
+
+    assert agent.run_once() == Phase.IDLE
+    assert store.load().phase == Phase.IDLE
+
+
+def test_missing_artifact_size_poisons_and_rejects_without_flashing(tmp_path):
+    manifest = {
+        "version": "1.0.0",
+        "sequence": 1,
+        "artifact": {"url": "http://x/a.bin", "sha256": "0" * 64},  # no "size"
+    }
+    update = Update(version="1.0.0", sequence=1, manifest=manifest, raw_manifest=b"{}")
+    flashed = []
+    agent = _agent(tmp_path, StubSource(update), StubGate(), StubHealth([]), flashed)
+
+    assert agent.run_once() == Phase.REJECTED
+    assert flashed == []
+    assert StateStore(tmp_path / "state.json").is_poisoned("1.0.0")
+
+
+def test_flash_step_runs_inside_router_stopped(tmp_path):
+    calls = []
+
+    @contextlib.contextmanager
+    def spy_router_stopped():
+        calls.append("enter")
+        yield True
+        calls.append("exit")
+
+    flashed = []
+
+    def fetch(url, dest):
+        Path(dest).write_bytes(make_artifact_bytes())
+        return Path(dest)
+
+    def flash(artifact, target):
+        assert calls == ["enter"]  # the write happens while the router is "stopped"
+        flashed.append(artifact.path.name)
+
+    def verify(manifest, path, last_sequence):
+        pass
+
+    agent = Agent(
+        state_dir=tmp_path,
+        source=StubSource(_update()),
+        gate=StubGate(),
+        health_factory=lambda version: StubHealth([True]),
+        target=TARGET,
+        flash=flash,
+        fetch=fetch,
+        verify=verify,
+        router_stopped=spy_router_stopped,
+    )
+
+    assert agent.run_once() == Phase.COMMITTED
+    assert calls == ["enter", "exit"]
+    assert flashed == ["staged.bin"]
+
+
+def test_router_is_restarted_even_when_the_flash_raises(tmp_path):
+    calls = []
+
+    @contextlib.contextmanager
+    def spy_router_stopped():
+        calls.append("enter")
+        try:
+            yield True
+        finally:
+            calls.append("exit")
+
+    def fetch(url, dest):
+        Path(dest).write_bytes(make_artifact_bytes())
+        return Path(dest)
+
+    def flash(artifact, target):
+        raise FlashError("write failed")
+
+    def verify(manifest, path, last_sequence):
+        pass
+
+    agent = Agent(
+        state_dir=tmp_path,
+        source=StubSource(_update()),
+        gate=StubGate(),
+        health_factory=lambda version: StubHealth([]),
+        target=TARGET,
+        flash=flash,
+        fetch=fetch,
+        verify=verify,
+        router_stopped=spy_router_stopped,
+    )
+
+    assert agent.run_once() == Phase.IDLE
+    assert calls == ["enter", "exit"]

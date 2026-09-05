@@ -48,7 +48,7 @@ from pathlib import Path
 from typing import Callable
 
 from unoq_ota.artifact import ArtifactError, load_artifact
-from unoq_ota.flasher import FlashError, write_sketch
+from unoq_ota.flasher import FlashError, router_stopped as _real_router_stopped, write_sketch
 from unoq_ota.interfaces import Status
 from unoq_ota.state import MAX_ATTEMPTS, Phase, StateStore
 from unoq_ota.verify import VerificationError
@@ -78,6 +78,15 @@ class Agent:
         load=load_artifact,
         fetch=None,
         verify: Callable[[dict, Path, int], None] | None = None,
+        # Injectable for the same reason `flash`/`load`/`fetch` are: the real
+        # `router_stopped` shells out to `systemctl` on its default `run`
+        # argument, and this class's own tests must never risk that call
+        # reaching a real systemd -- on a bench Mac it has nothing to run
+        # against, and on the actual target it would stop and restart a real
+        # service. A fake here is a no-op context manager, not a stub of
+        # `run`, because callers of `run_once` have no reason to know
+        # `router_stopped` is implemented in terms of `subprocess.run` at all.
+        router_stopped: Callable[[], object] = _real_router_stopped,
     ):
         if fetch is None:
             # A missing `fetch` is a construction mistake, not a runtime
@@ -97,6 +106,7 @@ class Agent:
         self._load = load
         self._fetch = fetch
         self._verify = verify or self._default_verify
+        self._router_stopped = router_stopped
         self.store = StateStore(self.state_dir / "state.json")
 
     def _default_verify(self, manifest: dict, path: Path, last_sequence: int) -> None:
@@ -193,6 +203,31 @@ class Agent:
             return Phase.REJECTED
 
         self.state_dir.mkdir(parents=True, exist_ok=True)
+
+        # ---- preflight -----------------------------------------------------
+        from unoq_ota.preflight import PreflightError, check_clock, check_disk_space
+
+        try:
+            check_clock()
+            check_disk_space(self.state_dir, int(update.manifest["artifact"]["size"]))
+        except PreflightError as exc:
+            # Not the update's fault: do not count an attempt and do not
+            # poison. Unlike the fetch/verify failure branches below, no
+            # version-scoped phase has been recorded for this cycle yet, so
+            # there is nothing to revert -- but the store's *own* phase can
+            # still be stale from a previous cycle (e.g. a crash mid-STAGED),
+            # and returning IDLE here while state.json disagrees would be
+            # exactly the "inconsistent guard" this module's docstring warns
+            # against. `_set` keeps the two in agreement.
+            self.source.report(update, Status.WAITING_FOR_GATE, str(exc))
+            self._set(Phase.IDLE, clear_version=True)
+            return Phase.IDLE
+        except (KeyError, TypeError, ValueError):
+            self.store.poison(update.version)
+            self.source.report(update, Status.REJECTED, "manifest has no usable artifact size")
+            self._set(Phase.REJECTED, update.version)
+            return Phase.REJECTED
+
         staged = self.state_dir / "staged.bin"
 
         # ---- fetch -------------------------------------------------------
@@ -249,7 +284,14 @@ class Agent:
         self._set(Phase.FLASHING, update.version)
         self.source.report(update, Status.FLASHING, "writing sketch partition")
         try:
-            self._flash(artifact, self.target)
+            # arduino-router's ExecStopPost toggles the SWD reset line and
+            # the unit is Restart=always -- if it restarts mid-erase, systemd
+            # asserts reset on the target mid-write. Stopping it for the
+            # window (and always restarting, even on failure) means that
+            # reset happens at a moment this call chooses, not one systemd
+            # picks for us.
+            with self._router_stopped():
+                self._flash(artifact, self.target)
         except FlashError as exc:
             self.source.report(update, Status.REJECTED, f"flash failed: {exc}")
             self._set(Phase.IDLE, clear_version=True)

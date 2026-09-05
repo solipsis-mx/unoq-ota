@@ -14,6 +14,7 @@ from unoq_ota.flasher import (
     build_write_script,
     read_partition,
     read_resident_header,
+    router_stopped,
     run_openocd,
 )
 
@@ -302,3 +303,115 @@ def test_read_resident_header_parses_the_header_from_the_dumped_bytes(tmp_path, 
 
     assert header.ver == 1
     assert header.magic == 0x2341
+
+
+# ---------------------------------------------------------------------------
+# router_stopped
+#
+# Real `subprocess.run` is never used here -- these tests inject a fake
+# `run` callable so nothing actually shells out to `systemctl` on whatever
+# machine happens to run this suite.
+# ---------------------------------------------------------------------------
+
+
+def _completed(returncode):
+    return subprocess.CompletedProcess(args=[], returncode=returncode, stdout="", stderr="")
+
+
+def test_router_stopped_stops_then_restarts_on_success():
+    calls = []
+
+    def fake_run(cmd, **kwargs):
+        calls.append(cmd)
+        return _completed(0)
+
+    with router_stopped(run=fake_run) as stopped:
+        assert stopped is True
+        assert calls == [["systemctl", "stop", "arduino-router"]]
+
+    assert calls == [
+        ["systemctl", "stop", "arduino-router"],
+        ["systemctl", "start", "arduino-router"],
+    ]
+
+
+def test_router_stopped_uses_the_given_unit_name():
+    calls = []
+
+    def fake_run(cmd, **kwargs):
+        calls.append(cmd)
+        return _completed(0)
+
+    with router_stopped(run=fake_run, unit="other-router"):
+        pass
+
+    assert calls == [
+        ["systemctl", "stop", "other-router"],
+        ["systemctl", "start", "other-router"],
+    ]
+
+
+def test_router_stopped_flashes_anyway_when_stop_fails_and_does_not_restart():
+    calls = []
+
+    def fake_run(cmd, **kwargs):
+        calls.append(cmd)
+        return _completed(1)
+
+    with router_stopped(run=fake_run) as stopped:
+        assert stopped is False
+
+    # Never actually stopped -- nothing to restart, and no start call at all.
+    assert calls == [["systemctl", "stop", "arduino-router"]]
+
+
+def test_router_stopped_survives_systemctl_being_entirely_unrunnable():
+    # A raised OSError from `run()` itself (missing binary, broken PATH, a
+    # bench machine with no systemd) must degrade to "could not stop it,
+    # flashing anyway" -- the same as a non-zero return code -- rather than
+    # escaping the context manager uncaught. Without this, wiring
+    # router_stopped into the agent would crash every flash attempt on any
+    # host without systemctl, instead of just skipping the stop/start.
+    def fake_run(cmd, **kwargs):
+        raise FileNotFoundError("systemctl: command not found")
+
+    with router_stopped(run=fake_run) as stopped:
+        assert stopped is False
+
+
+def test_router_stopped_restarts_even_if_the_body_raises():
+    calls = []
+
+    def fake_run(cmd, **kwargs):
+        calls.append(cmd)
+        return _completed(0)
+
+    with pytest.raises(FlashError):
+        with router_stopped(run=fake_run):
+            raise FlashError("write failed")
+
+    assert calls == [
+        ["systemctl", "stop", "arduino-router"],
+        ["systemctl", "start", "arduino-router"],
+    ]
+
+
+def test_router_stopped_survives_the_restart_itself_failing(monkeypatch):
+    # If restarting also raises, that must not mask an exception already
+    # propagating out of the flash -- the caller's FlashError still wins.
+    calls = []
+
+    def flaky_run(cmd, **kwargs):
+        calls.append(cmd)
+        if cmd[1] == "start":
+            raise OSError("systemctl vanished mid-flash")
+        return _completed(0)
+
+    with pytest.raises(FlashError):
+        with router_stopped(run=flaky_run):
+            raise FlashError("write failed")
+
+    assert calls == [
+        ["systemctl", "stop", "arduino-router"],
+        ["systemctl", "start", "arduino-router"],
+    ]

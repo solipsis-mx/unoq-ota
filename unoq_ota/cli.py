@@ -3,13 +3,10 @@
 from __future__ import annotations
 
 import argparse
-import base64
 import logging
 import time
 from pathlib import Path
 from urllib.parse import urlsplit
-
-from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
 from unoq_ota.agent import Agent
 from unoq_ota.artifact import load_artifact
@@ -17,6 +14,7 @@ from unoq_ota.board import resolve_flash_target
 from unoq_ota.flasher import read_partition
 from unoq_ota.gates.always import AlwaysGate
 from unoq_ota.health.version_report import VersionReportHealthCheck
+from unoq_ota.keyring import load_keyring
 from unoq_ota.reconciler import reconcile
 from unoq_ota.sources.http_manifest import HttpManifestSource, download
 from unoq_ota.sources.local import LocalFileSource
@@ -28,25 +26,15 @@ log = logging.getLogger(__name__)
 def _load_public_keys(keys_dir: Path) -> dict:
     """Load Ed25519 public keys from `<key_id>.public.b64` files.
 
-    This duplicates the shape a later `unoq_ota.keyring.load_keyring` is
-    expected to formalize, but that module isn't part of this task's
-    interfaces yet, and `run` has nowhere else to get a keyring from -- an
-    agent constructed with an empty one rejects every manifest it is ever
-    offered. A key file that can't be parsed is skipped with a warning
-    rather than aborting startup: an operator adding a new key should not be
-    able to take every existing one down with a typo in an unrelated file.
+    Thin wrapper around `unoq_ota.keyring.load_keyring`, kept as its own
+    function (rather than calling `load_keyring` at the `_run` call site)
+    only to add the one behaviour that is specific to `run` rather than to
+    the keyring concept in general: a keyring that loaded zero usable keys
+    is worth its own warning here, because an agent constructed with an
+    empty one rejects every manifest it is ever offered, and that is a much
+    easier failure to miss in a log than "directory not found" is.
     """
-    keys: dict = {}
-    if not keys_dir.is_dir():
-        log.warning("keys directory %s does not exist; no manifest will verify", keys_dir)
-        return keys
-    for path in sorted(keys_dir.glob("*.public.b64")):
-        key_id = path.name[: -len(".public.b64")]
-        try:
-            raw = base64.b64decode(path.read_text().strip())
-            keys[key_id] = Ed25519PublicKey.from_public_bytes(raw)
-        except Exception as exc:  # noqa: BLE001 - one bad key file must not take down the rest
-            log.warning("skipping unreadable key %s: %s", path, exc)
+    keys = load_keyring(keys_dir)
     if not keys:
         log.warning("no usable keys loaded from %s; every manifest will be rejected", keys_dir)
     return keys
