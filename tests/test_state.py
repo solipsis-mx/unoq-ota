@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from unoq_ota.state import MAX_ATTEMPTS, Phase, State, StateStore
 
 
@@ -64,3 +66,66 @@ def test_poisons_a_version_and_remembers_it(tmp_path):
 
 def test_max_attempts_is_small():
     assert MAX_ATTEMPTS == 2
+
+
+@pytest.mark.parametrize("payload", ["[]", '"hello"', "null"])
+def test_load_returns_defaults_for_valid_json_that_is_not_an_object(tmp_path, payload):
+    # json.loads happily accepts a list, a string, or null. The old code
+    # called raw.get(...) unconditionally and raised AttributeError on all
+    # three -- reproduced by hand before this fix.
+    path = tmp_path / "state.json"
+    path.write_text(payload)
+
+    state = StateStore(path).load()
+
+    assert state.phase == Phase.IDLE
+    assert state.attempts == {}
+    assert state.poisoned == []
+
+
+def test_attempts_for_returns_zero_for_a_non_numeric_stored_value(tmp_path):
+    # Structurally valid JSON ({"1.0.0": "banana"}) used to load cleanly and
+    # then blow up with an uncaught ValueError the first time attempts_for
+    # or record_attempt touched that version.
+    path = tmp_path / "state.json"
+    path.write_text(json.dumps({"phase": "idle", "attempts": {"1.0.0": "banana"}}))
+    store = StateStore(path)
+
+    assert store.attempts_for("1.0.0") == 0
+
+    # And it must still be safe to record a fresh attempt afterwards.
+    store.record_attempt("1.0.0")
+    assert store.attempts_for("1.0.0") == 1
+
+
+def test_poisoned_is_sanitized_to_a_list_of_strings(tmp_path):
+    # A bare string would otherwise explode into a list of its characters
+    # (list("hello") == ['h','e','l','l','o']); a JSON object would
+    # contribute its keys as fake poisoned versions.
+    path = tmp_path / "state.json"
+    path.write_text(json.dumps({"phase": "idle", "poisoned": "hello"}))
+    assert StateStore(path).load().poisoned == []
+
+    path.write_text(json.dumps({"phase": "idle", "poisoned": {"1.0.0": True}}))
+    assert StateStore(path).load().poisoned == []
+
+    path.write_text(json.dumps({"phase": "idle", "poisoned": ["1.0.0", 2, None, "1.0.1"]}))
+    assert StateStore(path).load().poisoned == ["1.0.0", "1.0.1"]
+
+
+def test_write_failure_propagates_leaves_no_tmp_file_and_preserves_existing_state(tmp_path, monkeypatch):
+    path = tmp_path / "state.json"
+    store = StateStore(path)
+    store.save(State(phase=Phase.STAGED, version="1.0.0"))
+    original_contents = path.read_text()
+
+    def _boom(*args, **kwargs):
+        raise RuntimeError("disk full")
+
+    monkeypatch.setattr(json, "dump", _boom)
+
+    with pytest.raises(RuntimeError, match="disk full"):
+        store.save(State(phase=Phase.FLASHING, version="2.0.0"))
+
+    assert list(tmp_path.glob("*.tmp")) == []
+    assert path.read_text() == original_contents

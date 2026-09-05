@@ -43,6 +43,36 @@ class State:
     core_version: str | None = None
 
 
+def _sanitize_attempts(value: object) -> dict:
+    """Keep only entries whose count coerces to int.
+
+    A poisoned version is the durable guard against a bad build; a dropped
+    attempt counter just leaves that version's retries bounded by
+    MAX_ATTEMPTS starting from zero again -- a redundant reflash at worst,
+    never a crash.
+    """
+    if not isinstance(value, dict):
+        return {}
+    sanitized = {}
+    for key, count in value.items():
+        try:
+            sanitized[key] = int(count)
+        except (ValueError, TypeError):
+            continue
+    return sanitized
+
+
+def _sanitize_poisoned(value: object) -> list:
+    """Coerce to a list of strings, dropping anything that isn't one.
+
+    Guards against e.g. a bare string ("hello") turning into a list of its
+    characters, or a JSON object contributing its keys as fake entries.
+    """
+    if not isinstance(value, list):
+        return []
+    return [item for item in value if isinstance(item, str)]
+
+
 class StateStore:
     def __init__(self, path: Path):
         self.path = Path(path)
@@ -52,12 +82,16 @@ class StateStore:
             raw = json.loads(self.path.read_text())
         except (OSError, ValueError):
             return State()
+        if not isinstance(raw, dict):
+            # Valid JSON but not an object -- e.g. `[]`, `"hello"`, `null`.
+            # Treat it the same as unreadable: return defaults, never raise.
+            return State()
         try:
             return State(
                 phase=Phase(raw.get("phase", "idle")),
                 version=raw.get("version"),
-                attempts=dict(raw.get("attempts") or {}),
-                poisoned=list(raw.get("poisoned") or []),
+                attempts=_sanitize_attempts(raw.get("attempts")),
+                poisoned=_sanitize_poisoned(raw.get("poisoned")),
                 sequence=int(raw.get("sequence") or 0),
                 core_version=raw.get("core_version"),
             )
