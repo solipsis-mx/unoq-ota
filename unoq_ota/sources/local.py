@@ -21,15 +21,15 @@ class LocalFileSource:
 
     def check(self):
         path = self.directory / MANIFEST_NAME
-        if not path.is_file():
-            return None
         try:
+            if not path.is_file():
+                return None
             raw = path.read_bytes()
             manifest = json.loads(raw)
             version = str(manifest["version"])
             sequence = int(manifest["sequence"])
-        except (OSError, ValueError, KeyError, TypeError):
-            log.warning("ignoring unreadable manifest at %s", path)
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            log.warning("ignoring unreadable manifest at %s: %s", path, exc)
             return None
 
         if self._poisoned(version):

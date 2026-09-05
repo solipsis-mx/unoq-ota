@@ -1,8 +1,12 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
+
+import pytest
 
 from unoq_ota.interfaces import Status
+from unoq_ota.sources.http_manifest import HttpManifestSource, download
 from unoq_ota.sources.local import LocalFileSource
 
 
@@ -56,3 +60,191 @@ def test_report_does_not_raise(tmp_path):
     update = source.check()
 
     source.report(update, Status.COMMITTED, "done")   # must not raise
+
+
+# ---------------------------------------------------------------------------
+# B1: LocalFileSource.check() must return None, never raise, when the
+# filesystem probe itself fails (a root-owned or chmod 000 manifest.json can
+# make Path.is_file() propagate PermissionError instead of returning False).
+# Monkeypatched rather than chmod'd so this can't behave differently on a
+# CI runner or under a different umask.
+# ---------------------------------------------------------------------------
+
+
+def test_check_returns_none_when_the_manifest_probe_raises_permission_error(tmp_path, monkeypatch):
+    (tmp_path / "manifest.json").write_text(json.dumps(_manifest()))
+
+    def _raise(self):
+        raise PermissionError("permission denied")
+
+    monkeypatch.setattr(Path, "is_file", _raise)
+
+    assert LocalFileSource(tmp_path).check() is None
+
+
+def test_check_returns_none_when_the_manifest_read_raises_permission_error(tmp_path, monkeypatch):
+    (tmp_path / "manifest.json").write_text(json.dumps(_manifest()))
+
+    def _raise(self):
+        raise PermissionError("permission denied")
+
+    monkeypatch.setattr(Path, "read_bytes", _raise)
+
+    assert LocalFileSource(tmp_path).check() is None
+
+
+# ---------------------------------------------------------------------------
+# Fakes for HttpManifestSource / download -- no real network.
+# ---------------------------------------------------------------------------
+
+
+class _FakeManifestResponse:
+    def __init__(self, content=b"", exc=None):
+        self.content = content
+        self._exc = exc
+
+    def raise_for_status(self):
+        if self._exc:
+            raise self._exc
+
+
+class _FakeManifestSession:
+    def __init__(self, response=None, exc=None):
+        self._response = response
+        self._exc = exc
+
+    def get(self, url, timeout=None):
+        if self._exc:
+            raise self._exc
+        return self._response
+
+
+def test_http_manifest_source_reads_a_manifest():
+    session = _FakeManifestSession(
+        _FakeManifestResponse(content=json.dumps(_manifest()).encode())
+    )
+    source = HttpManifestSource("http://example.invalid/manifest.json", session=session, jitter_s=0)
+
+    update = source.check()
+
+    assert update is not None
+    assert update.version == "1.0.0"
+    assert update.sequence == 1
+
+
+def test_http_manifest_source_returns_none_on_fetch_failure():
+    session = _FakeManifestSession(exc=ConnectionError("no route to host"))
+    source = HttpManifestSource("http://example.invalid/manifest.json", session=session, jitter_s=0)
+
+    assert source.check() is None
+
+
+# ---------------------------------------------------------------------------
+# B2: the jitter sleep must never let a nonsensical jitter_s escape check()
+# as a bare ValueError -- guarded in check(), and rejected loudly where the
+# mistake is actually made: construction.
+# ---------------------------------------------------------------------------
+
+
+def test_construction_rejects_a_negative_jitter():
+    with pytest.raises(ValueError, match="jitter"):
+        HttpManifestSource("http://example.invalid/manifest.json", jitter_s=-5)
+
+
+def test_construction_rejects_a_non_numeric_jitter():
+    with pytest.raises(ValueError, match="jitter"):
+        HttpManifestSource("http://example.invalid/manifest.json", jitter_s="soon")
+
+
+def test_check_survives_a_jitter_value_gone_bad_after_construction(monkeypatch):
+    # Defence in depth: even if jitter_s is mutated to something nonsensical
+    # after construction, check() must degrade like any other transient
+    # failure (log + return None) instead of raising out of the poll loop.
+    session = _FakeManifestSession(
+        _FakeManifestResponse(content=json.dumps(_manifest()).encode())
+    )
+    source = HttpManifestSource("http://example.invalid/manifest.json", session=session, jitter_s=0)
+    source.jitter_s = -5
+
+    assert source.check() is None
+
+
+# ---------------------------------------------------------------------------
+# B3: download() must never leave a truncated file at `dest` behind, on any
+# failure path -- not just the max-bytes-exceeded branch.
+# ---------------------------------------------------------------------------
+
+
+class _FakeStreamResponse:
+    def __init__(self, chunks, status_exc=None):
+        self._chunks = chunks
+        self._status_exc = status_exc
+
+    def raise_for_status(self):
+        if self._status_exc:
+            raise self._status_exc
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        return False
+
+    def iter_content(self, chunk_size):
+        for chunk in self._chunks:
+            if isinstance(chunk, Exception):
+                raise chunk
+            yield chunk
+
+
+class _FakeStreamSession:
+    def __init__(self, response):
+        self._response = response
+
+    def get(self, url, stream=True, timeout=None):
+        return self._response
+
+
+def test_download_writes_the_response_body(tmp_path):
+    dest = tmp_path / "artifact.bin"
+    session = _FakeStreamSession(_FakeStreamResponse([b"hello", b" world"]))
+
+    result = download("http://example.invalid/artifact.bin", dest, session=session)
+
+    assert result == dest
+    assert dest.read_bytes() == b"hello world"
+
+
+def test_download_removes_partial_file_on_mid_stream_failure(tmp_path):
+    # Reproduces the reported defect: 2000 bytes written, then the connection
+    # drops mid-transfer.
+    dest = tmp_path / "artifact.bin"
+    chunks = [b"a" * 1000, b"b" * 1000, ConnectionError("connection dropped")]
+    session = _FakeStreamSession(_FakeStreamResponse(chunks))
+
+    with pytest.raises(ConnectionError):
+        download("http://example.invalid/artifact.bin", dest, session=session)
+
+    assert not dest.exists()
+
+
+def test_download_removes_partial_file_when_size_cap_exceeded(tmp_path):
+    dest = tmp_path / "artifact.bin"
+    session = _FakeStreamSession(_FakeStreamResponse([b"a" * 10, b"b" * 10]))
+
+    with pytest.raises(ValueError, match="exceeded"):
+        download("http://example.invalid/artifact.bin", dest, session=session, max_bytes=15)
+
+    assert not dest.exists()
+
+
+def test_download_removes_partial_file_on_bad_status(tmp_path):
+    dest = tmp_path / "artifact.bin"
+    session = _FakeStreamSession(
+        _FakeStreamResponse([b"should-not-be-written"], status_exc=ConnectionError("HTTP 500"))
+    )
+
+    with pytest.raises(ConnectionError):
+        download("http://example.invalid/artifact.bin", dest, session=session)
+
+    assert not dest.exists()
