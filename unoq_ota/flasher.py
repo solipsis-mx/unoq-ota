@@ -211,12 +211,24 @@ def router_stopped(run=subprocess.run, unit: str = ROUTER_UNIT):
     was handled below originally, which is exactly the kind of asymmetric
     guard that turns "flashing anyway" into an uncaught crash on the one
     class of host most likely to hit it.
+
+    Both calls also carry a wall-clock `timeout`, matching this module's own
+    docstring promise that every invocation runs under one. `systemctl stop`
+    blocks until the unit's `ExecStop`/`ExecStopPost` complete -- and
+    `ExecStopPost` is the GPIO-38 toggle this guard exists because of -- so a
+    wedged systemd or D-Bus would otherwise hang the agent inside the flash
+    window indefinitely. `subprocess.TimeoutExpired` is not an `OSError`, so
+    both except clauses below now catch it explicitly: adding the timeout
+    alone would have opened a new escape path out of `run_once`, uncaught --
+    exactly the crash-loop failure this project has hit before.
     """
     stopped = False
     try:
         try:
-            result = run(["systemctl", "stop", unit], capture_output=True, text=True)
-        except OSError as exc:
+            result = run(
+                ["systemctl", "stop", unit], capture_output=True, text=True, timeout=30
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
             log.warning(
                 "could not run systemctl to stop %s: %s; flashing anyway", unit, exc
             )
@@ -228,6 +240,8 @@ def router_stopped(run=subprocess.run, unit: str = ROUTER_UNIT):
     finally:
         if stopped:
             try:
-                run(["systemctl", "start", unit], capture_output=True, text=True)
-            except OSError as exc:
+                run(
+                    ["systemctl", "start", unit], capture_output=True, text=True, timeout=30
+                )
+            except (OSError, subprocess.TimeoutExpired) as exc:
                 log.warning("could not restart %s after flashing: %s", unit, exc)

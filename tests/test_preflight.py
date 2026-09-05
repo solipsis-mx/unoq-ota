@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import base64
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
 from cryptography.hazmat.primitives import serialization
@@ -58,19 +58,32 @@ def test_clock_accepts_a_plausible_time():
     check_clock(now=datetime(2026, 9, 4, tzinfo=timezone.utc))
 
 
-def test_clock_normalises_an_odd_timezone_before_checking_the_year():
-    # A device can have a perfectly correct clock and still carry a local UTC
-    # offset that puts the wall-clock year on the wrong side of a year
-    # boundary. The check must judge the underlying instant, not whatever
-    # year the local offset happens to display.
-    from datetime import timedelta
-
-    just_after_new_year_far_east = datetime(
-        2026, 1, 1, 0, 30, tzinfo=timezone(timedelta(hours=14))
+def test_clock_normalisation_rescues_a_negative_offset_across_new_year():
+    # A correct clock reported at UTC-11 just before New Year. Unnormalised
+    # this reads as 2025 (the wrong side of a 2026 floor) and is wrongly
+    # rejected; normalised to UTC it is 2026-01-01 and must not raise.
+    #
+    # This is the direction normalisation actually rescues -- deleting the
+    # two UTC-normalisation lines in check_clock makes this test fail, unlike
+    # the positive-offset test this replaces, which mutation testing proved
+    # stayed green either way (both the naive year and the normalised year
+    # landed on the same side of that test's floor).
+    just_before_new_year_far_west = datetime(
+        2025, 12, 31, 23, 30, tzinfo=timezone(timedelta(hours=-11))
     )
-    # In UTC this instant is still 2025-12-31 -- one year below a 2026 floor
-    # -- so a correct implementation must not raise when floor_year=2025.
-    check_clock(now=just_after_new_year_far_east, floor_year=2025)
+    check_clock(now=just_before_new_year_far_west, floor_year=2026)
+
+
+def test_clock_normalisation_is_stricter_for_a_positive_offset_across_new_year():
+    # The opposite direction: a positive offset can make local wall-clock
+    # time read as the new year while the underlying UTC instant has not
+    # rolled over yet. Normalisation must judge that instant honestly and
+    # reject it, even though the naive (unnormalised) local year would pass.
+    just_after_new_year_far_east = datetime(
+        2020, 1, 1, 0, 30, tzinfo=timezone(timedelta(hours=14))
+    )
+    with pytest.raises(PreflightError, match="clock"):
+        check_clock(now=just_after_new_year_far_east, floor_year=2020)
 
 
 def test_disk_check_rejects_insufficient_space(tmp_path):
@@ -80,6 +93,18 @@ def test_disk_check_rejects_insufficient_space(tmp_path):
 
 def test_disk_check_passes_for_a_small_artifact(tmp_path):
     check_disk_space(tmp_path, needed_bytes=1024, margin_bytes=0)
+
+
+def test_disk_check_raises_preflight_error_when_path_and_parent_are_both_missing(tmp_path):
+    # `check_disk_space` probes `path` if it exists, else `path.parent`. If
+    # neither exists (e.g. a state dir whose grandparent was never created),
+    # `shutil.disk_usage` raises a bare `FileNotFoundError`. Left uncaught,
+    # that escapes as a plain `OSError` -- caught by neither of `run_once`'s
+    # preflight `except` clauses in agent.py -- instead of the one
+    # documented failure mode this module promises its callers.
+    missing = tmp_path / "no-such-parent" / "no-such-child" / "state.json"
+    with pytest.raises(PreflightError, match="disk"):
+        check_disk_space(missing, needed_bytes=1024)
 
 
 def test_no_drift_when_resident_matches_the_believed_image(tmp_path):

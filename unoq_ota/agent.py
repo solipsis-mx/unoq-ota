@@ -45,7 +45,7 @@ import logging
 import os
 import tempfile
 from pathlib import Path
-from typing import Callable
+from typing import Callable, ContextManager
 
 from unoq_ota.artifact import ArtifactError, load_artifact
 from unoq_ota.flasher import FlashError, router_stopped as _real_router_stopped, write_sketch
@@ -86,7 +86,7 @@ class Agent:
         # service. A fake here is a no-op context manager, not a stub of
         # `run`, because callers of `run_once` have no reason to know
         # `router_stopped` is implemented in terms of `subprocess.run` at all.
-        router_stopped: Callable[[], object] = _real_router_stopped,
+        router_stopped: Callable[[], ContextManager[object]] = _real_router_stopped,
     ):
         if fetch is None:
             # A missing `fetch` is a construction mistake, not a runtime
@@ -205,11 +205,51 @@ class Agent:
         self.state_dir.mkdir(parents=True, exist_ok=True)
 
         # ---- preflight -----------------------------------------------------
+        # Imported here, not at module scope, because the agent guard tests
+        # monkeypatch these names on the `unoq_ota.preflight` module object
+        # (`monkeypatch.setattr(preflight_module, "check_clock", ...)`) and
+        # rely on this function-local import re-reading that attribute on
+        # every call. A module-level `from unoq_ota.preflight import
+        # check_clock` would bind its own name once at import time, and a
+        # future "cleanup" to that form would silently decouple this from
+        # those tests -- they would keep passing while patching a name
+        # nothing here reads.
         from unoq_ota.preflight import PreflightError, check_clock, check_disk_space
+
+        # `update.manifest` is attacker-controlled until `self._verify(...)`
+        # runs, later in this method -- signature first, so nothing upstream
+        # of it trusts attacker-chosen fields (see verify.py's docstring).
+        # This parse is a structural check only ("is there a usable size at
+        # all"), not a value anything below may act on: a malformed manifest
+        # is reproducible and poisoned here, same as the fetch/verify-failure
+        # branches below.
+        try:
+            int(update.manifest["artifact"]["size"])
+        except (KeyError, TypeError, ValueError):
+            self.store.poison(update.version)
+            self.source.report(update, Status.REJECTED, "manifest has no usable artifact size")
+            self._set(Phase.REJECTED, update.version)
+            return Phase.REJECTED
 
         try:
             check_clock()
-            check_disk_space(self.state_dir, int(update.manifest["artifact"]["size"]))
+            # The bound is the sketch partition's own size (`self.target`,
+            # known from the board), not the manifest's declared size. A
+            # served manifest can declare an arbitrary `artifact.size`, and
+            # using that attacker-chosen value here would let an inflated
+            # size make this check fail forever -- landing in the
+            # PreflightError branch below, which by design never poisons and
+            # never counts an attempt, so nothing would ever cap the retries.
+            # The partition size cannot be smaller than what a legitimate
+            # artifact needs and needs no manifest at all, so it closes that
+            # off without touching the disk check's own before-the-download
+            # purpose. `write_sketch` (flasher.py) separately checks the
+            # verified artifact's *actual* size against this same bound right
+            # before flashing, so no additional re-check of the manifest's
+            # declared size is added after verification -- that later check
+            # already covers the trusted-data case with a stronger signal
+            # (the real bytes) than the manifest's own claim about them.
+            check_disk_space(self.state_dir, self.target.max_size)
         except PreflightError as exc:
             # Not the update's fault: do not count an attempt and do not
             # poison. Unlike the fetch/verify failure branches below, no
@@ -222,11 +262,6 @@ class Agent:
             self.source.report(update, Status.WAITING_FOR_GATE, str(exc))
             self._set(Phase.IDLE, clear_version=True)
             return Phase.IDLE
-        except (KeyError, TypeError, ValueError):
-            self.store.poison(update.version)
-            self.source.report(update, Status.REJECTED, "manifest has no usable artifact size")
-            self._set(Phase.REJECTED, update.version)
-            return Phase.REJECTED
 
         staged = self.state_dir / "staged.bin"
 

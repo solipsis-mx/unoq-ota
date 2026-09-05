@@ -415,3 +415,40 @@ def test_router_stopped_survives_the_restart_itself_failing(monkeypatch):
         ["systemctl", "stop", "arduino-router"],
         ["systemctl", "start", "arduino-router"],
     ]
+
+
+def test_router_stopped_survives_systemctl_stop_hanging_past_its_timeout():
+    # `systemctl stop` blocks until the unit's ExecStop/ExecStopPost finish --
+    # and ExecStopPost is the GPIO-38 toggle this guard exists because of. A
+    # wedged systemd or D-Bus must degrade to "could not stop it, flashing
+    # anyway", the same as a non-zero return code or a raised OSError, rather
+    # than hanging the agent inside the flash window indefinitely or escaping
+    # the context manager uncaught.
+    def fake_run(cmd, **kwargs):
+        assert kwargs.get("timeout") == 30
+        raise subprocess.TimeoutExpired(cmd=cmd, timeout=30)
+
+    with router_stopped(run=fake_run) as stopped:
+        assert stopped is False
+
+
+def test_router_stopped_survives_the_restart_itself_timing_out():
+    # Symmetric with the stop-side timeout above: a restart that hangs past
+    # its timeout must not escape the context manager either, and must not
+    # mask an exception already propagating out of the flash.
+    calls = []
+
+    def flaky_run(cmd, **kwargs):
+        calls.append(cmd)
+        if cmd[1] == "start":
+            raise subprocess.TimeoutExpired(cmd=cmd, timeout=30)
+        return _completed(0)
+
+    with pytest.raises(FlashError):
+        with router_stopped(run=flaky_run):
+            raise FlashError("write failed")
+
+    assert calls == [
+        ["systemctl", "stop", "arduino-router"],
+        ["systemctl", "start", "arduino-router"],
+    ]

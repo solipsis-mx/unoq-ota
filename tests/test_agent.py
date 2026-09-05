@@ -708,6 +708,62 @@ def test_missing_artifact_size_poisons_and_rejects_without_flashing(tmp_path):
     assert StateStore(tmp_path / "state.json").is_poisoned("1.0.0")
 
 
+def test_device_side_error_from_clock_check_is_not_misattributed_to_the_manifest(
+    tmp_path, monkeypatch
+):
+    # I2: check_clock()/check_disk_space() used to share one `try` with the
+    # artifact-size parse. Anything other than PreflightError raised by
+    # either of them -- not just a bad manifest -- fell into the sibling
+    # `except (KeyError, TypeError, ValueError)` and was poisoned as
+    # "manifest has no usable artifact size", permanently rejecting a good
+    # version over a device-side condition with a diagnostic that lies about
+    # the cause. Forcing check_clock to raise a bare TypeError (standing in
+    # for any such device-side bug, unrelated to the manifest) must not be
+    # swallowed into that poisoning path.
+    import unoq_ota.preflight as preflight_module
+
+    def broken_clock(now=None, floor_year=2020):
+        raise TypeError("device-side bug unrelated to the manifest")
+
+    monkeypatch.setattr(preflight_module, "check_clock", broken_clock)
+
+    source = StubSource(_update())
+    agent = _agent(tmp_path, source, StubGate(), StubHealth([]))
+
+    with pytest.raises(TypeError):
+        agent.run_once()
+
+    store = StateStore(tmp_path / "state.json")
+    assert not store.is_poisoned("1.0.0")
+    assert not any(
+        "manifest has no usable artifact size" in detail for _, detail in source.reports
+    )
+
+
+def test_absurd_manifest_size_does_not_cause_indefinite_deferral(tmp_path):
+    # I4: the pre-download disk check must not trust the manifest's declared
+    # artifact.size -- it is attacker input until self._verify(...) runs,
+    # later in run_once. Before this fix, an inflated declared size made
+    # check_disk_space fail every single cycle: the PreflightError branch
+    # defers without poisoning and without counting an attempt, so nothing
+    # ever capped the retries -- a durable denial-of-update from
+    # unauthenticated manifest input. The bound must instead come from the
+    # board's own sketch partition (self.target.max_size), which a served
+    # manifest cannot influence. This uses the real, unmocked
+    # unoq_ota.preflight.check_disk_space against the real filesystem.
+    manifest = {
+        "version": "1.0.0",
+        "sequence": 1,
+        "artifact": {"url": "http://x/a.bin", "size": 10**15, "sha256": "0" * 64},
+    }
+    update = Update(version="1.0.0", sequence=1, manifest=manifest, raw_manifest=b"{}")
+    flashed = []
+    agent = _agent(tmp_path, StubSource(update), StubGate(), StubHealth([True]), flashed)
+
+    assert agent.run_once() == Phase.COMMITTED
+    assert flashed == ["staged.bin"]
+
+
 def test_flash_step_runs_inside_router_stopped(tmp_path):
     calls = []
 
