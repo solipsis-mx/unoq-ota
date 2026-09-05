@@ -7,6 +7,7 @@ import base64
 import logging
 import time
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
@@ -55,15 +56,25 @@ def _fetch(url: str, dest: Path, source_dir: Path | None) -> None:
     """Fetch an artifact named by a manifest's `artifact.url`.
 
     An http(s) URL is downloaded with `unoq_ota.sources.http_manifest`'s own
-    size-capped, cleans-up-on-failure `download()`. Anything else is treated
-    as a local path -- resolved against `source_dir` when relative -- which
-    is what makes `LocalFileSource` usable for bench and air-gapped setups
-    where the artifact sits next to `manifest.json` rather than behind a URL.
+    size-capped, cleans-up-on-failure `download()`. A `file://` URL or a bare
+    path is treated as local -- resolved against `source_dir` when relative
+    -- which is what makes `LocalFileSource` usable for bench and air-gapped
+    setups where the artifact sits next to `manifest.json` rather than behind
+    a URL. Anything else (e.g. `s3://...`) is an explicit configuration
+    mistake: silently treating it as a local path used to fail safely --
+    "download failed", from a `FileNotFoundError` on a path that was never a
+    path -- but hid the real cause, so it is rejected here instead.
     """
-    if url.startswith("http://") or url.startswith("https://"):
+    scheme = urlsplit(url).scheme
+    if scheme in ("http", "https"):
         download(url, dest)
         return
-    raw_path = url[len("file://") :] if url.startswith("file://") else url
+    if scheme not in ("", "file"):
+        raise ValueError(
+            f"unsupported URL scheme {scheme!r} in artifact url {url!r} "
+            "(expected http, https, file, or a bare path)"
+        )
+    raw_path = url[len("file://") :] if scheme == "file" else url
     src = Path(raw_path)
     if not src.is_absolute() and source_dir is not None:
         src = source_dir / src

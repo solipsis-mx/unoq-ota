@@ -5,6 +5,14 @@ Wants=network-online.target
 
 [Service]
 Type=simple
+# `run` cannot start as shipped: --source and --keys-dir (and --source-dir or
+# --manifest-url, depending on --source) are required and have no site-wide
+# default. Without them this fails loudly -- argparse error, exit 2, visible
+# in `journalctl -u unoq-ota` -- so supply them via a drop-in:
+#   systemctl edit unoq-ota.service
+#   [Service]
+#   ExecStart=
+#   ExecStart=/usr/local/bin/unoq-ota run --source http --manifest-url https://example.invalid/manifest.json --keys-dir /etc/unoq-ota/keys
 ExecStart=/usr/local/bin/unoq-ota run
 Restart=always
 RestartSec=30

@@ -13,8 +13,8 @@ from pathlib import Path
 from cryptography.hazmat.primitives import serialization
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from unoq_ota.artifact import load_artifact          # noqa: E402
-from unoq_ota.verify import canonical_bytes          # noqa: E402
+from unoq_ota.artifact import ArtifactError, load_artifact  # noqa: E402
+from unoq_ota.verify import canonical_bytes                 # noqa: E402
 
 
 def _require_utc_qualified(raw: str, flag: str) -> str:
@@ -68,7 +68,14 @@ def main() -> int:
     args = parser.parse_args()
 
     # Validate before signing: never sign an artifact that would be refused.
-    validated = load_artifact(args.artifact)
+    # Caught here rather than left to propagate -- a bad artifact path or a
+    # malformed sketch is an operator mistake, not this tool's bug, and
+    # should read like one: one line on stderr and a non-zero exit, the same
+    # style `_require_utc_qualified` already uses above, not a traceback.
+    try:
+        validated = load_artifact(args.artifact)
+    except ArtifactError as exc:
+        raise SystemExit(f"cannot sign {args.artifact}: {exc}")
 
     manifest = {
         "schema": 1,
@@ -96,9 +103,14 @@ def main() -> int:
     if args.expires is not None:
         manifest["expires"] = _require_utc_qualified(args.expires, "expires")
 
-    key = serialization.load_pem_private_key(
-        args.private_key.read_bytes(), password=None
-    )
+    try:
+        key = serialization.load_pem_private_key(
+            args.private_key.read_bytes(), password=None
+        )
+    except OSError as exc:
+        raise SystemExit(f"cannot read --private-key {args.private_key}: {exc}")
+    except ValueError as exc:
+        raise SystemExit(f"cannot load --private-key {args.private_key}: {exc}")
     manifest["signature"] = {
         "alg": "ed25519",
         "key_id": args.key_id,
