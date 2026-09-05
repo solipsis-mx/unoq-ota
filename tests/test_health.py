@@ -46,3 +46,65 @@ def test_unhealthy_on_silence():
 
 def test_unhealthy_on_a_single_report():
     assert _Check("1.0.0", ["OTA-HEALTH 1.0.0 seq=1"]).wait_healthy(5) is False
+
+
+def test_unhealthy_on_a_boot_loop():
+    # Counter restarts every cycle. Comparing only first/last would read this
+    # healthy whenever the window happens to end higher than it started.
+    check = _Check(
+        "1.0.0",
+        [
+            "OTA-HEALTH 1.0.0 seq=1",
+            "OTA-HEALTH 1.0.0 seq=2",
+            "OTA-HEALTH 1.0.0 seq=1",
+            "OTA-HEALTH 1.0.0 seq=2",
+        ],
+    )
+    assert check.wait_healthy(5) is False
+
+
+def test_unhealthy_on_a_mid_window_reset():
+    # First and last alone would read 8 > 5 as healthy, missing the reset.
+    check = _Check(
+        "1.0.0",
+        ["OTA-HEALTH 1.0.0 seq=5", "OTA-HEALTH 1.0.0 seq=1", "OTA-HEALTH 1.0.0 seq=8"],
+    )
+    assert check.wait_healthy(5) is False
+
+
+def test_healthy_on_a_clean_monotonic_run():
+    check = _Check(
+        "1.0.0",
+        ["OTA-HEALTH 1.0.0 seq=1", "OTA-HEALTH 1.0.0 seq=2", "OTA-HEALTH 1.0.0 seq=3"],
+    )
+    assert check.wait_healthy(5) is True
+
+
+def test_collect_runs_the_real_subprocess_path_and_parses_its_output():
+    # Exercises the actual _collect implementation -- temp-file capture,
+    # Popen, and read-back -- against a harmless local command instead of
+    # the monitor. None of the tests above touch this path; they all
+    # override _collect entirely.
+    check = VersionReportHealthCheck(
+        "test-1.0.0",
+        monitor_cmd=[
+            "printf",
+            "OTA-HEALTH test-1.0.0 seq=1\nOTA-HEALTH test-1.0.0 seq=2\n",
+        ],
+    )
+    lines = check._collect(5)
+    parsed = [parse_health_line(line) for line in lines]
+    assert [p for p in parsed if p is not None] == [
+        ("test-1.0.0", 1),
+        ("test-1.0.0", 2),
+    ]
+    assert check.wait_healthy(5) is True
+
+
+def test_collect_returns_no_reports_when_the_command_is_silent():
+    # A command that exits cleanly without printing anything -- the real
+    # _collect path must come back empty, and wait_healthy must read
+    # unhealthy, not raise.
+    check = VersionReportHealthCheck("test-1.0.0", monitor_cmd=["true"])
+    assert check._collect(5) == []
+    assert check.wait_healthy(5) is False
