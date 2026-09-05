@@ -20,12 +20,30 @@ escape as an uncaught exception. An escaped exception here is worse than a
 missed poison -- a supervised agent process just restarts and retries the
 same update forever, never reaching the poison list that exists to stop
 exactly that loop.
+
+Health-check discipline follows the same rule, one level further:
+`health_factory` is caller-injected (unoq_ota/interfaces.py), so this module
+cannot constrain what a concrete `HealthCheck` raises either. Both the
+factory call and `wait_healthy()` itself are wrapped by `_is_healthy` below,
+mirroring `unoq_ota.reconciler._is_healthy` exactly -- an escaped exception
+here must never be allowed to skip the rollback block, because skipping it
+leaves the device running unconfirmed firmware with no further attempt to
+recover in-band.
+
+One fact reframes the rollback path below: this module runs on the Linux
+side, and a dead MCU does not reboot the Linux side that hosts it. So
+"the reconciler will catch it next boot" is not a safety net for a device
+that is dead right now -- nothing causes the boot. The window is unbounded,
+which is why this loop tries to recover in-band at all, and why its rollback
+report is careful never to claim more confidence than a byte-level flash
+plus an identity check can actually support.
 """
 
 from __future__ import annotations
 
 import logging
-import shutil
+import os
+import tempfile
 from pathlib import Path
 from typing import Callable
 
@@ -61,6 +79,14 @@ class Agent:
         fetch=None,
         verify: Callable[[dict, Path, int], None] | None = None,
     ):
+        if fetch is None:
+            # A missing `fetch` is a construction mistake, not a runtime
+            # condition: left as None, every call falls into `self._fetch(...)`
+            # raising `TypeError`, which the broad `except Exception` around
+            # the fetch step (below) reports as "download failed". That reads
+            # exactly like a permanently unreachable network, forever, and
+            # hides a wiring bug behind a plausible-looking transient failure.
+            raise TypeError("Agent requires a `fetch` callable; it has no usable default")
         self.state_dir = Path(state_dir)
         self.source = source
         self.gate = gate
@@ -95,23 +121,74 @@ class Agent:
 
         verify_manifest(manifest, self.public_keys, last_sequence, artifact_path=Path(path))
 
-    def _set(self, phase: Phase, version: str | None = None) -> None:
+    def _set(
+        self,
+        phase: Phase,
+        version: str | None = None,
+        *,
+        clear_version: bool = False,
+    ) -> None:
         state = self.store.load()
         state.phase = phase
-        if version is not None:
+        if clear_version:
+            state.version = None
+        elif version is not None:
             state.version = version
         self.store.save(state)
+
+    def _is_healthy(self, version: str, timeout_s: float, *, context: str) -> bool:
+        """Run one health check, treating any exception as "not healthy".
+
+        Both the `health_factory(version)` call and `wait_healthy()` sit
+        inside the same guard: `health_factory` is caller-injected, so its
+        exception discipline cannot be constrained here, and either half
+        raising must be treated identically to a clean `False` return --
+        never as a reason to skip whatever check comes next.
+        """
+        try:
+            return self.health_factory(version).wait_healthy(timeout_s)
+        except Exception as exc:  # noqa: BLE001 - see docstring above
+            log.warning("%s: health check raised %r, treating as unhealthy", context, exc)
+            return False
+
+    def _atomic_copy(self, src: Path, dst: Path) -> None:
+        """Copy `src` to `dst` via temp-file + os.replace.
+
+        Mirrors `StateStore.save` (state.py): write to a temp file in the
+        same directory, fsync, then atomically rename into place. `dst` here
+        is `current.bin` or `previous.bin` -- the first two names both this
+        agent's own rollback loop and `reconciler.py`'s boot-time recovery
+        reach for -- so a crash or ENOSPC mid-write must never be able to
+        leave a truncated file at that path for either of them to pick up.
+        """
+        dst = Path(dst)
+        fd, tmp = tempfile.mkstemp(dir=str(dst.parent), suffix=".tmp")
+        try:
+            with os.fdopen(fd, "wb") as handle:
+                handle.write(Path(src).read_bytes())
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(tmp, dst)
+        except BaseException:
+            Path(tmp).unlink(missing_ok=True)
+            raise
 
     def run_once(self) -> Phase:
         update = self.source.check()
         if update is None:
             return Phase.IDLE
 
-        if self.store.attempts_for(update.version) >= MAX_ATTEMPTS:
+        # Cheap, local, and first: a poisoned version must never reach the
+        # network. Before this check `is_poisoned` had no production caller
+        # anywhere in the module, so a poisoned-but-not-yet-capped version
+        # (see the verify-failure branch below) would download, verify, and
+        # get rejected again on every single cycle, forever, over whatever
+        # link the device has.
+        poisoned = self.store.is_poisoned(update.version)
+        if poisoned or self.store.attempts_for(update.version) >= MAX_ATTEMPTS:
             self.store.poison(update.version)
-            self.source.report(
-                update, Status.REJECTED, f"exceeded {MAX_ATTEMPTS} attempts"
-            )
+            reason = "version is poisoned" if poisoned else f"exceeded {MAX_ATTEMPTS} attempts"
+            self.source.report(update, Status.REJECTED, reason)
             self._set(Phase.REJECTED, update.version)
             return Phase.REJECTED
 
@@ -126,7 +203,7 @@ class Agent:
         except Exception as exc:
             log.warning("download failed: %s", exc)
             self.source.report(update, Status.REJECTED, f"download failed: {exc}")
-            self._set(Phase.IDLE)
+            self._set(Phase.IDLE, clear_version=True)
             return Phase.IDLE
 
         # ---- verify ------------------------------------------------------
@@ -135,6 +212,14 @@ class Agent:
             self._verify(update.manifest, staged, self.store.load().sequence)
             artifact = self._load(staged)
         except (VerificationError, ArtifactError) as exc:
+            # A genuine verification/artifact failure is reproducible: the
+            # same bytes will fail the same way every time, so this version
+            # must both count against the attempt cap and be poisoned --
+            # without `record_attempt`, `attempts_for` stays at zero forever
+            # and only the (previously unused) poison list stood between a
+            # replayed or malformed manifest and a full download/verify/
+            # reject cycle on every pass.
+            self.store.record_attempt(update.version)
             self.store.poison(update.version)
             self.source.report(update, Status.REJECTED, str(exc))
             self._set(Phase.REJECTED, update.version)
@@ -149,7 +234,7 @@ class Agent:
             # failure above is handled.
             log.warning("unexpected error verifying %s: %s", update.version, exc)
             self.source.report(update, Status.REJECTED, f"verify/load error: {exc}")
-            self._set(Phase.IDLE)
+            self._set(Phase.IDLE, clear_version=True)
             return Phase.IDLE
 
         # ---- gate --------------------------------------------------------
@@ -167,16 +252,33 @@ class Agent:
             self._flash(artifact, self.target)
         except FlashError as exc:
             self.source.report(update, Status.REJECTED, f"flash failed: {exc}")
-            self._set(Phase.IDLE)
+            self._set(Phase.IDLE, clear_version=True)
             return Phase.IDLE
 
-        # ---- health ------------------------------------------------------
+        # ---- health --------------------------------------------------------
         self._set(Phase.HEALTH_CHECK, update.version)
-        if self.health_factory(update.version).wait_healthy(HEALTH_TIMEOUT_S):
+        if self._is_healthy(
+            update.version, HEALTH_TIMEOUT_S, context=f"{update.version}: post-flash check"
+        ):
             current = self.state_dir / "current.bin"
-            if current.is_file():
-                shutil.copy2(current, self.state_dir / "previous.bin")
-            shutil.copy2(staged, current)
+            try:
+                if current.is_file():
+                    self._atomic_copy(current, self.state_dir / "previous.bin")
+                self._atomic_copy(staged, current)
+            except Exception as exc:
+                # Non-atomic, unguarded copies here used to be able to
+                # truncate `current.bin` -- the first candidate both this
+                # module's own rollback loop and the reconciler reach for --
+                # and to escape `run_once` after the device was already
+                # running the new, uncommitted firmware. `_atomic_copy`
+                # guarantees `current.bin` itself is never left partial; this
+                # guard additionally ensures a failure here is reported and
+                # retried rather than raised, so the same update is simply
+                # re-offered next cycle instead of crashing the process.
+                log.warning("commit-path copy failed for %s: %s", update.version, exc)
+                self.source.report(update, Status.REJECTED, f"commit copy failed: {exc}")
+                self._set(Phase.IDLE, clear_version=True)
+                return Phase.IDLE
             state = self.store.load()
             state.sequence = update.sequence
             state.phase = Phase.COMMITTED
@@ -187,7 +289,19 @@ class Agent:
 
         # ---- rollback ----------------------------------------------------
         self._set(Phase.ROLLING_BACK, update.version)
-        self.store.poison(update.version)
+        try:
+            self.store.poison(update.version)
+        except Exception as exc:
+            # A state-write failure must not be allowed to abort rollback.
+            # The board may be physically unreachable and is, right now,
+            # running firmware that just failed its own health check; the
+            # loop below is the only thing that can still fix that in-band,
+            # today, without waiting for a reboot that nothing will trigger.
+            # Losing the poison record costs a possible re-offer of this
+            # version later -- an inconvenience. Skipping rollback because of
+            # it could cost the board.
+            log.warning("failed to persist poison record for %s: %s", update.version, exc)
+
         for name in ROLLBACK_CANDIDATES:
             candidate = self.state_dir / name
             if not candidate.is_file():
@@ -205,18 +319,53 @@ class Agent:
                 # reason to give up on the rest.
                 log.warning("rollback candidate %s unusable: %s", name, exc)
                 continue
-            # Rollback restores a *different* version than the one this
-            # health_factory was built to assert the identity of, so the
-            # version-identity health check cannot meaningfully be re-run
-            # here. Successfully writing a known-good image is the success
-            # condition this loop can verify; confirming the device is
-            # actually healthy again is the reconciler's job, run
-            # unconditionally at next boot against exactly this same
-            # candidate list.
-            self.source.report(update, Status.ROLLED_BACK, f"restored {name}")
-            self._set(Phase.ROLLED_BACK, update.version)
+
+            if self._is_healthy(
+                update.version, HEALTH_TIMEOUT_S, context=f"rollback: {name}"
+            ):
+                # `update.version` is the *bad* firmware's identity. A
+                # health check built for that identity reporting True here
+                # means the device still looks like the bad firmware --
+                # either this candidate's flash did not take, or it took and
+                # the device still answers as the old identity for some
+                # other reason. Either way nothing was restored, so this is
+                # a failure for rollback purposes: fall through to the next
+                # candidate, exactly as reconciler.py does.
+                log.warning(
+                    "rollback candidate %s: device still reports %s, treating as failed",
+                    name,
+                    update.version,
+                )
+                continue
+
+            # `False` is uninformative here, not a confirmation: the image
+            # just restored is a *different* version than `update.version`,
+            # so a health check built for `update.version`'s identity cannot
+            # assert that the restored image is actually healthy -- only
+            # that the device no longer identifies as the bad one. Genuine
+            # health confirmation of the restored image happens later, at
+            # next boot, in `reconciler.py`. The reported detail says so
+            # explicitly rather than implying a confirmation that never
+            # happened.
+            self.source.report(
+                update,
+                Status.ROLLED_BACK,
+                f"restored {name}, health unconfirmed until next boot",
+            )
+            # Not `update.version`: that is the poisoned firmware this
+            # rollback just moved away from, not what the device is running
+            # now. Leaving it in `state.version` would describe the wrong
+            # firmware as current.
+            self._set(Phase.ROLLED_BACK, clear_version=True)
             return Phase.ROLLED_BACK
 
-        self.source.report(update, Status.ROLLED_BACK, "no usable rollback image")
-        self._set(Phase.ROLLED_BACK, update.version)
-        return Phase.ROLLED_BACK
+        # No candidate restored anything -- the device is still running the
+        # firmware that just failed its health check, with no in-band fix
+        # available. This must not be reported as ROLLED_BACK: nothing was
+        # rolled back. The reconciler is still the backstop at next boot,
+        # but there is no boot pending on a device that is simply still
+        # running (rather than crashed), so that backstop has not engaged
+        # yet either.
+        self.source.report(update, Status.REJECTED, "no usable rollback image was available")
+        self._set(Phase.REJECTED, clear_version=True)
+        return Phase.REJECTED
