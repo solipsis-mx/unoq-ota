@@ -60,6 +60,21 @@ def test_run_openocd_raises_on_timeout(monkeypatch):
         run_openocd("init; shutdown", timeout_s=5)
 
 
+def test_run_openocd_normalizes_permission_error_to_flasherror(monkeypatch):
+    # The openocd binary can lose its exec bit (e.g. after a rootfs update),
+    # be mid-rewrite (ETXTBSY), or hit ENOMEM on fork -- all OSError
+    # subclasses that subprocess.run's documented contract doesn't name.
+    # Every caller of run_openocd, including the reconciler, must only ever
+    # see FlashError out of this function, never a raw PermissionError.
+    def fake_run(*args, **kwargs):
+        raise PermissionError("no exec bit")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    with pytest.raises(FlashError, match="no exec bit"):
+        run_openocd("init; shutdown")
+
+
 def test_run_openocd_raises_when_the_script_reported_failure(monkeypatch):
     def fake_run(*args, **kwargs):
         return subprocess.CompletedProcess(

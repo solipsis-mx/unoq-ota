@@ -100,6 +100,17 @@ def run_openocd(script: str, timeout_s: float = 120.0) -> str:
         )
     except FileNotFoundError:
         raise FlashError(f"openocd not found at {OPENOCD_BIN}")
+    except OSError as exc:
+        # subprocess.run's documented exceptions are TimeoutExpired and
+        # FileNotFoundError, but exec() can fail in other OSError-shaped ways
+        # this module doesn't control: the binary loses its exec bit
+        # (PermissionError), it's mid-rewrite by a concurrent update
+        # (ETXTBSY), or fork() fails under memory pressure (ENOMEM). Normalize
+        # all of those to this function's one documented failure mode --
+        # FlashError -- with the original message preserved, so every caller
+        # (including the reconciler, which cannot control what its injected
+        # `flash` callable raises) can rely on catching just FlashError here.
+        raise FlashError(f"openocd could not be started: {exc}")
 
     output = (proc.stdout or "") + (proc.stderr or "")
     if proc.returncode != 0:
