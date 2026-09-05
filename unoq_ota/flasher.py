@@ -6,9 +6,12 @@ of a ~79 KB sketch takes about 7.5 seconds, and reads run at roughly
 
 Two details are load-bearing rather than cosmetic:
 
-* Every flash operation is wrapped in TCL `catch`. Without it a thrown error
+* Every flash operation -- including the `init`/`reset`/`halt` preamble and
+  `flash info 0` -- is wrapped in TCL `catch`. Without it a thrown error
   aborts the script before `shutdown`, and OpenOCD falls through into its
-  server loop, holding the SWD lines and the lock indefinitely.
+  server loop, holding the SWD lines and the lock indefinitely. The preamble
+  commands are exactly the ones that throw when the target is unresponsive
+  or undervolted, so they cannot be left uncaught.
 * Every invocation runs under a wall-clock timeout. stm32u5x.cfg's clock
   configuration contains unbounded spin loops that never terminate on an
   undervolted target.
@@ -26,18 +29,45 @@ OPENOCD_BIN = "/opt/openocd/bin/openocd"
 OPENOCD_ROOT = "/opt/openocd"
 OPENOCD_CFG = "openocd_gpiod.cfg"
 
-_PREAMBLE = "reset_config srst_only srst_push_pull\ninit\nreset\nhalt\n"
+# reset_config is a configuration command, not a target operation -- it
+# cannot itself throw from an unresponsive target, so it stays outside the
+# catch guards. init/reset/halt are exactly the commands that throw when the
+# target is unresponsive or undervolted, so each one is individually
+# catch-guarded: a thrown error here must still reach `shutdown`, or OpenOCD
+# falls through into its server loop holding the SWD lines.
+_PREAMBLE = (
+    "reset_config srst_only srst_push_pull\n"
+    'if {[catch {init} err]} { echo "INIT-FAILED: $err"; shutdown error }\n'
+    'if {[catch {reset} err]} { echo "INIT-FAILED: $err"; shutdown error }\n'
+    'if {[catch {halt} err]} { echo "INIT-FAILED: $err"; shutdown error }\n'
+)
+
+_FAILURE_MARKERS = ("INIT-FAILED", "WRITE-FAILED", "VERIFY-FAILED", "READ-FAILED")
 
 
 class FlashError(Exception):
     """A flash operation failed or could not be completed safely."""
 
 
+def _summarize(output: str) -> str:
+    """Keep head and tail of a long OpenOCD log instead of only the tail.
+
+    A pure tail-truncation can discard an early fatal error in favour of
+    trailing boilerplate, and whoever reads this may be deciding whether to
+    physically visit a device.
+    """
+    output = output.strip()
+    if len(output) <= 1000:
+        return output
+    elided = len(output) - 1000
+    return f"{output[:500]}\n...[{elided} chars elided]...\n{output[-500:]}"
+
+
 def build_write_script(image: Path, address: int) -> str:
     addr = f"0x{address:08x}"
     return (
         _PREAMBLE
-        + "flash info 0\n"
+        + 'if {[catch {flash info 0} err]} { echo "INIT-FAILED: $err"; shutdown error }\n'
         + f'if {{[catch {{flash write_image erase {image} {addr} bin}} err]}} '
         + '{ echo "WRITE-FAILED: $err"; shutdown error }\n'
         + f'if {{[catch {{flash verify_image {image} {addr} bin}} err]}} '
@@ -73,10 +103,10 @@ def run_openocd(script: str, timeout_s: float = 120.0) -> str:
 
     output = (proc.stdout or "") + (proc.stderr or "")
     if proc.returncode != 0:
-        raise FlashError(f"openocd exit {proc.returncode}: {output.strip()[-500:]}")
-    for marker in ("WRITE-FAILED", "VERIFY-FAILED", "READ-FAILED"):
+        raise FlashError(f"openocd exit {proc.returncode}: {_summarize(output)}")
+    for marker in _FAILURE_MARKERS:
         if marker in output:
-            raise FlashError(f"{marker} in openocd output: {output.strip()[-500:]}")
+            raise FlashError(f"{marker} in openocd output: {_summarize(output)}")
     return output
 
 
@@ -101,6 +131,11 @@ def read_partition(
     run_openocd(build_read_script(dest, address, length), timeout_s=timeout_s)
     if not dest.is_file():
         raise FlashError(f"openocd reported success but {dest} was not written")
+    actual = dest.stat().st_size
+    if actual != length:
+        raise FlashError(
+            f"openocd reported success but {dest} is {actual} bytes, expected {length}"
+        )
     return dest
 
 
