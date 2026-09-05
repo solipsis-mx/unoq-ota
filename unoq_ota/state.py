@@ -57,7 +57,7 @@ def _sanitize_attempts(value: object) -> dict:
     for key, count in value.items():
         try:
             sanitized[key] = int(count)
-        except (ValueError, TypeError):
+        except (ValueError, TypeError, OverflowError):
             continue
     return sanitized
 
@@ -95,7 +95,7 @@ def _sanitize_sequence(value: object) -> int:
     """Coerced to int, else 0."""
     try:
         return int(value)
-    except (ValueError, TypeError):
+    except (ValueError, TypeError, OverflowError):
         return 0
 
 

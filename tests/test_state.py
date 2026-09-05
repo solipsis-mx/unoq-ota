@@ -188,6 +188,51 @@ def test_load_returns_default_state_for_a_non_dict_file(tmp_path):
     assert state == State()
 
 
+def test_load_survives_infinite_sequence_while_keeping_poisoned(tmp_path):
+    # json.loads accepts the bare (non-standard) literal Infinity, and
+    # int(float('inf')) raises OverflowError -- not a ValueError or
+    # TypeError -- so it used to escape _sanitize_sequence and crash load()
+    # outright. That's a regression against the exact "never raise"
+    # invariant the per-field sanitizers were meant to strengthen: the old
+    # all-or-nothing code returned a bare State() here, losing data but
+    # surviving. Per-field defaulting must survive it AND keep poisoned.
+    path = tmp_path / "state.json"
+    path.write_text('{"sequence": Infinity, "poisoned": ["1.0.0"]}')
+
+    state = StateStore(path).load()
+
+    assert state.sequence == 0
+    assert state.poisoned == ["1.0.0"]
+
+
+def test_load_survives_negative_infinite_sequence(tmp_path):
+    path = tmp_path / "state.json"
+    path.write_text('{"sequence": -Infinity}')
+
+    assert StateStore(path).load().sequence == 0
+
+
+def test_load_survives_nan_sequence(tmp_path):
+    # int(float('nan')) already raises ValueError, which was already
+    # caught -- pinned here against a future refactor of the except clause.
+    path = tmp_path / "state.json"
+    path.write_text('{"sequence": NaN}')
+
+    assert StateStore(path).load().sequence == 0
+
+
+def test_load_drops_an_infinite_attempts_entry_but_keeps_the_rest(tmp_path):
+    # Same OverflowError defect, same route, in _sanitize_attempts: a
+    # single non-coercible count must not take down the other entries.
+    path = tmp_path / "state.json"
+    path.write_text('{"attempts": {"1.0.0": Infinity, "2.0.0": 3}}')
+
+    state = StateStore(path).load()
+
+    assert "1.0.0" not in state.attempts
+    assert state.attempts["2.0.0"] == 3
+
+
 def test_write_failure_propagates_leaves_no_tmp_file_and_preserves_existing_state(tmp_path, monkeypatch):
     path = tmp_path / "state.json"
     store = StateStore(path)
