@@ -120,7 +120,9 @@ def test_write_script_guards_the_init_preamble():
     script = build_write_script(Path("/tmp/x.bin"), 0x08100000)
     assert "INIT-FAILED" in script
     assert script.count("catch {init}") == 1
-    assert script.count("catch {reset}") == 1
+    # Two guarded resets: the preamble's and the trailing one that starts
+    # the new firmware (see test_write_script_guards_the_trailing_reset).
+    assert script.count("catch {reset}") == 2
     assert script.count("catch {halt}") == 1
     assert "catch {flash info 0}" in script
 
@@ -185,8 +187,64 @@ def test_read_script_guards_the_init_preamble():
     script = build_read_script(Path("/tmp/out.bin"), 0x08100000, 16)
     assert "INIT-FAILED" in script
     assert script.count("catch {init}") == 1
-    assert script.count("catch {reset}") == 1
+    # Two guarded resets: the preamble's and the trailing one (see
+    # test_read_script_guards_the_trailing_reset).
+    assert script.count("catch {reset}") == 2
     assert script.count("catch {halt}") == 1
+
+
+def test_write_script_guards_the_trailing_reset():
+    # The trailing reset starts the newly flashed firmware. Left unguarded,
+    # a throw here aborts before `shutdown` and strands OpenOCD holding the
+    # SWD lines -- same hazard as the preamble, just at the other end of the
+    # script, so it needs the same catch guard and its own marker.
+    script = build_write_script(Path("/tmp/x.bin"), 0x08100000)
+    assert "RESET-FAILED" in script
+    assert script.count("catch {reset}") == 2  # preamble reset + trailing reset
+    assert script.rstrip().endswith("shutdown")
+
+
+def test_read_script_guards_the_trailing_reset():
+    script = build_read_script(Path("/tmp/out.bin"), 0x08100000, 16)
+    assert "RESET-FAILED" in script
+    assert script.count("catch {reset}") == 2
+    assert script.rstrip().endswith("shutdown")
+
+
+def test_write_script_flash_probe_uses_its_own_marker_not_init_failed():
+    # Item 3: `flash info 0` failing is a probe failure, not an init
+    # failure -- misleading it as INIT-FAILED sends whoever reads the log
+    # down the wrong path when debugging a stranded board.
+    script = build_write_script(Path("/tmp/x.bin"), 0x08100000)
+    assert "PROBE-FAILED" in script
+    assert 'catch {flash info 0} err]} { echo "PROBE-FAILED' in script
+
+
+def test_run_openocd_raises_when_the_trailing_reset_failed(monkeypatch):
+    def fake_run(*args, **kwargs):
+        return subprocess.CompletedProcess(
+            args=args,
+            returncode=0,
+            stdout="WRITE-AND-VERIFY-OK\nRESET-FAILED: target not responding",
+            stderr="",
+        )
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    with pytest.raises(FlashError, match="RESET-FAILED"):
+        run_openocd("init; shutdown")
+
+
+def test_run_openocd_raises_when_the_flash_probe_failed(monkeypatch):
+    def fake_run(*args, **kwargs):
+        return subprocess.CompletedProcess(
+            args=args, returncode=0, stdout="PROBE-FAILED: no flash bank 0", stderr=""
+        )
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    with pytest.raises(FlashError, match="PROBE-FAILED"):
+        run_openocd("init; shutdown")
 
 
 def test_read_partition_raises_when_the_dump_is_short(tmp_path, monkeypatch):

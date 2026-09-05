@@ -6,12 +6,13 @@ of a ~79 KB sketch takes about 7.5 seconds, and reads run at roughly
 
 Two details are load-bearing rather than cosmetic:
 
-* Every flash operation -- including the `init`/`reset`/`halt` preamble and
-  `flash info 0` -- is wrapped in TCL `catch`. Without it a thrown error
-  aborts the script before `shutdown`, and OpenOCD falls through into its
-  server loop, holding the SWD lines and the lock indefinitely. The preamble
-  commands are exactly the ones that throw when the target is unresponsive
-  or undervolted, so they cannot be left uncaught.
+* Every flash operation -- including the `init`/`reset`/`halt` preamble,
+  `flash info 0`, and the trailing `reset` that starts the new firmware --
+  is wrapped in TCL `catch`. Without it a thrown error aborts the script
+  before `shutdown`, and OpenOCD falls through into its server loop, holding
+  the SWD lines and the lock indefinitely. These are exactly the commands
+  that throw when the target is unresponsive or undervolted, so none of them
+  can be left uncaught.
 * Every invocation runs under a wall-clock timeout. stm32u5x.cfg's clock
   configuration contains unbounded spin loops that never terminate on an
   undervolted target.
@@ -42,7 +43,14 @@ _PREAMBLE = (
     'if {[catch {halt} err]} { echo "INIT-FAILED: $err"; shutdown error }\n'
 )
 
-_FAILURE_MARKERS = ("INIT-FAILED", "WRITE-FAILED", "VERIFY-FAILED", "READ-FAILED")
+_FAILURE_MARKERS = (
+    "INIT-FAILED",
+    "PROBE-FAILED",
+    "WRITE-FAILED",
+    "VERIFY-FAILED",
+    "READ-FAILED",
+    "RESET-FAILED",
+)
 
 
 class FlashError(Exception):
@@ -63,17 +71,31 @@ def _summarize(output: str) -> str:
     return f"{output[:500]}\n...[{elided} chars elided]...\n{output[-500:]}"
 
 
+# The trailing `reset` (after a successful write or read) starts the newly
+# staged firmware, or restores normal execution after a read. It is exactly
+# as capable of throwing on an unresponsive/undervolted target as the
+# preamble's reset, so it gets the same catch guard -- with its own marker,
+# RESET-FAILED, so a failed final reset doesn't read as a failed preamble in
+# the logs. A write that succeeded but didn't reset is still a failure: the
+# whole point of the reset is to start the new firmware, and if it didn't
+# happen, the firmware is not running.
+_TRAILING_RESET = (
+    'if {[catch {reset} err]} { echo "RESET-FAILED: $err"; shutdown error }\n'
+    "shutdown\n"
+)
+
+
 def build_write_script(image: Path, address: int) -> str:
     addr = f"0x{address:08x}"
     return (
         _PREAMBLE
-        + 'if {[catch {flash info 0} err]} { echo "INIT-FAILED: $err"; shutdown error }\n'
+        + 'if {[catch {flash info 0} err]} { echo "PROBE-FAILED: $err"; shutdown error }\n'
         + f'if {{[catch {{flash write_image erase {image} {addr} bin}} err]}} '
         + '{ echo "WRITE-FAILED: $err"; shutdown error }\n'
         + f'if {{[catch {{flash verify_image {image} {addr} bin}} err]}} '
         + '{ echo "VERIFY-FAILED: $err"; shutdown error }\n'
         + 'echo "WRITE-AND-VERIFY-OK"\n'
-        + "reset\nshutdown\n"
+        + _TRAILING_RESET
     )
 
 
@@ -84,7 +106,7 @@ def build_read_script(dest: Path, address: int, length: int) -> str:
         + f'if {{[catch {{dump_image {dest} {addr} {length}}} err]}} '
         + '{ echo "READ-FAILED: $err"; shutdown error }\n'
         + 'echo "READ-OK"\n'
-        + "reset\nshutdown\n"
+        + _TRAILING_RESET
     )
 
 

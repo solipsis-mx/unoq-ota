@@ -113,6 +113,81 @@ def test_poisoned_is_sanitized_to_a_list_of_strings(tmp_path):
     assert StateStore(path).load().poisoned == ["1.0.0", "1.0.1"]
 
 
+def test_load_preserves_poisoned_when_sequence_is_non_numeric(tmp_path):
+    # Item 2's regression guard: a single shape-valid-but-wrong field (a
+    # non-numeric "sequence") used to discard the whole state via one
+    # all-or-nothing try/except, wiping the poisoned list along with it.
+    # That list is the durable guard against a bad firmware version being
+    # re-offered forever, so losing it here would be a real bricking risk,
+    # not just a cosmetic loss.
+    path = tmp_path / "state.json"
+    path.write_text(
+        json.dumps({"phase": "staged", "poisoned": ["1.0.0"], "sequence": "abc"})
+    )
+
+    state = StateStore(path).load()
+
+    assert state.poisoned == ["1.0.0"]
+    assert state.sequence == 0
+    assert state.phase == Phase.STAGED
+
+
+def test_load_preserves_poisoned_when_phase_is_unknown(tmp_path):
+    path = tmp_path / "state.json"
+    path.write_text(
+        json.dumps({"phase": "not-a-real-phase", "poisoned": ["1.0.0"], "sequence": 3})
+    )
+
+    state = StateStore(path).load()
+
+    assert state.poisoned == ["1.0.0"]
+    assert state.phase == Phase.IDLE
+    assert state.sequence == 3
+
+
+def test_load_defaults_unknown_phase_to_idle_while_keeping_other_fields(tmp_path):
+    path = tmp_path / "state.json"
+    path.write_text(
+        json.dumps(
+            {
+                "phase": "bogus",
+                "version": "1.2.3",
+                "attempts": {"1.2.3": 1},
+                "poisoned": ["9.9.9"],
+                "sequence": 5,
+                "core_version": "2.0.0",
+            }
+        )
+    )
+
+    state = StateStore(path).load()
+
+    assert state.phase == Phase.IDLE
+    assert state.version == "1.2.3"
+    assert state.attempts == {"1.2.3": 1}
+    assert state.poisoned == ["9.9.9"]
+    assert state.sequence == 5
+    assert state.core_version == "2.0.0"
+
+
+def test_load_returns_default_state_for_an_unreadable_file(tmp_path):
+    path = tmp_path / "state.json"
+    path.write_text("{ this is not json")
+
+    state = StateStore(path).load()
+
+    assert state == State()
+
+
+def test_load_returns_default_state_for_a_non_dict_file(tmp_path):
+    path = tmp_path / "state.json"
+    path.write_text("[]")
+
+    state = StateStore(path).load()
+
+    assert state == State()
+
+
 def test_write_failure_propagates_leaves_no_tmp_file_and_preserves_existing_state(tmp_path, monkeypatch):
     path = tmp_path / "state.json"
     store = StateStore(path)

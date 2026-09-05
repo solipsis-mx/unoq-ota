@@ -73,6 +73,32 @@ def _sanitize_poisoned(value: object) -> list:
     return [item for item in value if isinstance(item, str)]
 
 
+def _sanitize_phase(value: object) -> Phase:
+    """A valid Phase value, else Phase.IDLE.
+
+    Each field is defaulted independently so that one shape-valid-but-wrong
+    field (an unknown phase string, a non-numeric sequence, ...) cannot take
+    the rest of the state -- in particular the poisoned list -- down with it.
+    """
+    try:
+        return Phase(value)
+    except ValueError:
+        return Phase.IDLE
+
+
+def _sanitize_optional_str(value: object) -> str | None:
+    """The value if it is a string, else None."""
+    return value if isinstance(value, str) else None
+
+
+def _sanitize_sequence(value: object) -> int:
+    """Coerced to int, else 0."""
+    try:
+        return int(value)
+    except (ValueError, TypeError):
+        return 0
+
+
 class StateStore:
     def __init__(self, path: Path):
         self.path = Path(path)
@@ -86,17 +112,19 @@ class StateStore:
             # Valid JSON but not an object -- e.g. `[]`, `"hello"`, `null`.
             # Treat it the same as unreadable: return defaults, never raise.
             return State()
-        try:
-            return State(
-                phase=Phase(raw.get("phase", "idle")),
-                version=raw.get("version"),
-                attempts=_sanitize_attempts(raw.get("attempts")),
-                poisoned=_sanitize_poisoned(raw.get("poisoned")),
-                sequence=int(raw.get("sequence") or 0),
-                core_version=raw.get("core_version"),
-            )
-        except (ValueError, TypeError):
-            return State()
+        # Each field is sanitized independently -- never one try/except
+        # around the whole thing -- so a single shape-valid-but-wrong field
+        # (e.g. a non-numeric "sequence") cannot discard the rest of the
+        # state, in particular the poisoned list that guards against a bad
+        # firmware version being re-offered forever.
+        return State(
+            phase=_sanitize_phase(raw.get("phase")),
+            version=_sanitize_optional_str(raw.get("version")),
+            attempts=_sanitize_attempts(raw.get("attempts")),
+            poisoned=_sanitize_poisoned(raw.get("poisoned")),
+            sequence=_sanitize_sequence(raw.get("sequence")),
+            core_version=_sanitize_optional_str(raw.get("core_version")),
+        )
 
     def save(self, state: State) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
