@@ -1,0 +1,29 @@
+name: Bug report
+description: Something does not work the way DESIGN.md or the README says it should.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Security issues go through [private reporting](https://github.com/solipsis-mx/unoq-ota/security/advisories/new), not here.
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you ran, what you expected, what you got. Redact hostnames, URLs that identify a fleet, and any keys.
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: Package version or git commit.
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: How to reproduce
+      description: Prefer a command line and a failing test over a board-only story, if you can.
+    validations:
+      required: true

@@ -1,0 +1,13 @@
+version = 1
+
+[[annotations]]
+path = [
+  "**/*.py",
+  "**/*.md",
+  "**/*.service",
+  "**/*.ino",
+  "**/*.toml",
+  ".gitignore",
+]
+SPDX-FileCopyrightText = "2026 Solipsis MX and the unoq-ota contributors"
+SPDX-License-Identifier = "MIT"

@@ -2,8 +2,22 @@
 name = "unoq-ota"
 version = "0.1.0"
 description = "Over-the-air firmware updates for the Arduino UNO Q's STM32"
+readme = "README.md"
+license = {file = "LICENSE"}
+authors = [{name = "Solipsis MX"}]
 requires-python = ">=3.9"
 dependencies = ["requests>=2.25", "cryptography>=3.4"]
+classifiers = [
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Topic :: Software Development :: Embedded Systems",
+]
+
+[project.urls]
+Homepage = "https://github.com/solipsis-mx/unoq-ota"
+Issues = "https://github.com/solipsis-mx/unoq-ota/issues"
+Source = "https://github.com/solipsis-mx/unoq-ota"
 
 [project.optional-dependencies]
 aws = ["awsiotsdk>=1.11"]

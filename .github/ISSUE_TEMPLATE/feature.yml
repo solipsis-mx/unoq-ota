@@ -1,0 +1,22 @@
+name: Feature request
+description: A generic mechanism this tool is missing. Not a deployment-specific fork.
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: need
+    attributes:
+      label: What is missing
+      description: Describe the mechanism (a flag, an interface, a config value), not a single site's wiring.
+    validations:
+      required: true
+  - type: textarea
+    id: why
+    attributes:
+      label: Why it belongs here
+      description: Why any integrator would use this, not only one fleet.
+    validations:
+      required: true
+  - type: markdown
+    attributes:
+      value: |
+        Out of scope unless maintainers ask: AWS IoT Jobs, a product-specific Gate, an installer, Linux/rootfs OTA, agent self-update.

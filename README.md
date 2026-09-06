@@ -82,7 +82,115 @@ unoq_ota/
   health/         version_report
 tools/            keygen, sign-artifact
 systemd/          unit files
+examples/         sketch health-report contract
 ```
+
+## Requirements
+
+- An Arduino UNO Q with the Zephyr core installed (`arduino:zephyr:unoq`).
+- Python 3.9 or newer on the Linux side.
+- OpenOCD as shipped on the board (the agent does not bundle it).
+- Root on the board for the systemd units (they stop `arduino-router` around
+  a flash so GPIO 38 stays still). Membership in `gpiod` is enough to *talk*
+  to SWD; the router-stop guard needs `systemctl`.
+
+Compile sketches **on the board**. Host-side compiles have failed on
+`Arduino_RouterBridge`.
+
+## Install
+
+On a development machine, or on the board:
+
+```bash
+python3 -m venv .venv
+.venv/bin/pip install -e '.[dev]'   # drop [dev] on a device
+```
+
+That provides the `unoq-ota` console script. A device install typically
+symlinks it to `/usr/local/bin/unoq-ota`.
+
+## Sketch contract
+
+Health checking requires the firmware to print a version and a heartbeat.
+Copy the few lines in [`examples/ota_health_report/ota_health_report.ino`](examples/ota_health_report/ota_health_report.ino)
+into your sketch. The version string in the sketch (`OTA_FW_VERSION`) **must
+match** the manifest's `version`, or post-flash health fails and the agent
+rolls back.
+
+Reports go out as `OTA-HEALTH <version> seq=<n>` on Serial. The agent
+collects them from TCP `127.0.0.1:7500` (the router packet path), not from
+`arduino-app-cli monitor`.
+
+## Keys and signing
+
+The private key never goes on a device.
+
+```bash
+tools/keygen.py --key-id bench --out-dir /path/to/keys
+# copies to the device:  /etc/unoq-ota/keys/bench.public.b64
+# stays on the signer:   /path/to/keys/bench.private.pem
+
+tools/sign-artifact.py sketch.bin --version 1.0.0 --sequence 1 \
+  --url https://example.com/sketch.bin \
+  --private-key /path/to/keys/bench.private.pem --key-id bench \
+  --out manifest.json
+# optional coupled host files:
+#   --host-payload app.tar.gz --host-url https://example.com/app.tar.gz
+```
+
+`--out` writes the manifest to a file. Without it, the JSON goes to stdout
+and progress goes to stderr, so `sign-artifact.py ... > manifest.json` still
+produces a valid document.
+
+`tools/bench-http.py` serves a directory and accepts `POST /events`, so a
+bench can exercise the whole pull path without a cloud account.
+
+## Running on a board
+
+```bash
+unoq-ota --state-dir /var/lib/unoq-ota target
+unoq-ota --state-dir /var/lib/unoq-ota reconcile
+unoq-ota --state-dir /var/lib/unoq-ota status --json
+unoq-ota --state-dir /var/lib/unoq-ota run --once --source http \
+  --manifest-url URL --keys-dir /etc/unoq-ota/keys \
+  --report-url URL --device-id HOSTNAME \
+  --host-dir /opt/my-app --host-unit my-app.service \
+  --max-payload-bytes 4000000
+```
+
+`--core-root PATH` (or `UNOQ_OTA_CORE_ROOT`) applies to every subcommand
+that touches flash: `target`, `backup`, `reconcile`, `run`. It accepts the
+core directory, an `.arduino15` directory, or the home directory that owns
+one. Under `User=root`, `$HOME` is `/root` and the core is usually not there.
+
+`--host-dir` / `--host-unit` are optional. Omit `host_payload` from the
+manifest and the update is MCU-only.
+
+## systemd
+
+Two units ship in [`systemd/`](systemd/):
+
+- `unoq-ota-reconcile.service` — oneshot at boot. Enable it. It does not
+  need extra flags beyond `UNOQ_OTA_CORE_ROOT` if the core is not under
+  `HOME`.
+- `unoq-ota.service` — the poller. The stock `ExecStart=/usr/local/bin/unoq-ota run`
+  is incomplete on purpose: `--source`, `--keys-dir`, and `--manifest-url`
+  (or `--source-dir`) have no site-wide default. Add a drop-in:
+
+```bash
+sudo systemctl edit unoq-ota.service
+```
+
+```ini
+[Service]
+ExecStart=
+ExecStart=/usr/local/bin/unoq-ota run --source http \
+  --manifest-url https://example.com/manifest.json \
+  --keys-dir /etc/unoq-ota/keys
+```
+
+Optional environment in `/etc/unoq-ota/agent.env` (both units already
+read it): `UNOQ_OTA_REPORT_URL`, `UNOQ_OTA_DEVICE_ID`, `UNOQ_OTA_CORE_ROOT`.
 
 ## Security
 
@@ -94,6 +202,17 @@ Be aware of what this software is: an agent that writes arbitrary code into a
 microcontroller, whose trust root is a file on a writable filesystem. Anyone
 who can write that file owns the MCU.
 
+To report a vulnerability, see [SECURITY.md](SECURITY.md).
+
+## Contributing
+
+Please read [CONTRIBUTING.md](CONTRIBUTING.md) and
+[CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md). Pull requests and issues are
+welcome. Cursor and Claude are co-collaborators; see [AUTHORS.md](AUTHORS.md).
+
 ## License
 
-MIT — see [LICENSE](LICENSE).
+MIT. See [LICENSE](LICENSE), [NOTICE](NOTICE), and [LICENSES/MIT.txt](LICENSES/MIT.txt).
+
+Arduino, Arduino UNO Q, and related names are trademarks of Arduino SA.
+This project is not affiliated with Arduino.
