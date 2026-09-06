@@ -35,6 +35,13 @@ logger = logging.getLogger(__name__)
 HEALTH_RE = re.compile(r"^OTA-HEALTH\s+(\S+)\s+seq=(\d+)\s*$")
 DEFAULT_MONITOR_ADDR = ("127.0.0.1", 7500)
 
+# How long to wait between connection attempts to the monitor port. The port
+# is not up the instant a flash finishes: the agent stops the router around
+# the write (it toggles the SWD reset line), so for a second or two
+# afterwards there is nothing listening, and the freshly reset MCU has not
+# printed anything yet either.
+CONNECT_RETRY_S = 0.5
+
 
 def parse_health_line(line: str) -> tuple[str, int] | None:
     match = HEALTH_RE.match(line.strip())
@@ -76,11 +83,33 @@ class VersionReportHealthCheck:
         host, port = self.monitor_addr
         deadline = time.monotonic() + timeout_s
         buf = b""
-        try:
-            sock = socket.create_connection((host, port), timeout=min(timeout_s, 5.0))
-        except OSError:
+        # Retried, not attempted once: a refused connection here means "not
+        # listening *yet*", and treating that as a verdict makes a healthy
+        # update look like dead firmware and rolls it back. The caller's
+        # timeout still bounds the whole thing -- connecting and reading
+        # share one deadline -- so an endpoint that never opens is still an
+        # unhealthy answer, just not a premature one.
+        sock = None
+        last_error = None
+        while True:
+            try:
+                sock = socket.create_connection(
+                    (host, port), timeout=min(max(deadline - time.monotonic(), 0.1), 5.0)
+                )
+                break
+            except OSError as exc:
+                last_error = exc
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            time.sleep(min(CONNECT_RETRY_S, remaining))
+        if sock is None:
             logger.warning(
-                "health check: could not connect to %s:%s", host, port, exc_info=True
+                "health check: could not connect to %s:%s within %.1fs: %s",
+                host,
+                port,
+                timeout_s,
+                last_error,
             )
             return []
         try:

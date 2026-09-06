@@ -159,3 +159,55 @@ def test_tcp_monitor_reads_health_lines_from_a_local_socket():
         "bench-wifi-1", monitor_addr=("127.0.0.1", port)
     )
     assert check.wait_healthy(2) is True
+
+
+def test_tcp_monitor_retries_a_refused_connection_until_the_port_opens():
+    # Found on the bench: once the router-stop guard actually worked, the
+    # monitor port spent a second or two refusing connections while the
+    # router came back after a flash. A single refused connect was read as
+    # "no reports" -- i.e. dead firmware -- and rolled back a healthy update.
+    import socket
+    import threading
+    import time
+
+    probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    probe.bind(("127.0.0.1", 0))
+    port = probe.getsockname()[1]
+    probe.close()  # nothing is listening now; the first connects must fail
+
+    def serve():
+        time.sleep(1.0)
+        server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        server.bind(("127.0.0.1", port))
+        server.listen(1)
+        conn, _ = server.accept()
+        try:
+            conn.sendall(b"OTA-HEALTH bench-host-6 seq=1\nOTA-HEALTH bench-host-6 seq=2\n")
+            time.sleep(0.2)
+        finally:
+            conn.close()
+            server.close()
+
+    threading.Thread(target=serve, daemon=True).start()
+    check = VersionReportHealthCheck("bench-host-6", monitor_addr=("127.0.0.1", port))
+
+    assert check.wait_healthy(8) is True
+
+
+def test_tcp_monitor_stops_retrying_at_the_deadline():
+    # The retry must stay inside the caller's budget: an endpoint that never
+    # opens is still an unhealthy verdict, not an unbounded wait.
+    import socket
+    import time
+
+    probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    probe.bind(("127.0.0.1", 0))
+    port = probe.getsockname()[1]
+    probe.close()
+
+    check = VersionReportHealthCheck("bench-host-6", monitor_addr=("127.0.0.1", port))
+    started = time.monotonic()
+
+    assert check.wait_healthy(1.5) is False
+    assert time.monotonic() - started < 6
