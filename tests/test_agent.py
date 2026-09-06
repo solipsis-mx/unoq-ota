@@ -16,7 +16,7 @@ from unoq_ota.artifact import load_artifact
 from unoq_ota.board import FlashTarget
 from unoq_ota.flasher import FlashError
 from unoq_ota.interfaces import Status, Update
-from unoq_ota.preflight import PreflightError
+from unoq_ota.preflight import MAX_PAYLOAD_BYTES, PreflightError
 from unoq_ota.state import MAX_ATTEMPTS, Phase, StateStore
 from unoq_ota.verify import VerificationError, canonical_bytes
 
@@ -1080,3 +1080,88 @@ def test_host_health_failure_rolls_back_host_and_mcu(tmp_path):
     assert agent.run_once() == Phase.ROLLED_BACK
     assert rolled == ["host"]
     assert flashed == ["staged.bin", "current.bin"]
+
+
+# ---------------------------------------------------------------------------
+# Disk preflight with a coupled host payload.
+#
+# The sketch bound comes from the partition, not the manifest (see run_once's
+# own comment on why an attacker-chosen size must never drive this check).
+# A host tarball has no partition to bound it, so the reserve is the same
+# configured cap the fetch is allowed to write -- again not the manifest's
+# declared `host_payload.size`, for exactly the same reason.
+# ---------------------------------------------------------------------------
+
+
+def _spy_disk(monkeypatch):
+    import unoq_ota.preflight as preflight_module
+
+    seen = []
+
+    def spy(path, needed_bytes, margin_bytes=50_000_000):
+        seen.append((Path(path), needed_bytes))
+
+    monkeypatch.setattr(preflight_module, "check_disk_space", spy)
+    return seen
+
+
+def _coupled_agent(tmp_path, host_dir=None, host_max_bytes=None):
+    def fetch(url, dest):
+        Path(dest).parent.mkdir(parents=True, exist_ok=True)
+        Path(dest).write_bytes(_host_bytes() if "host" in url else make_artifact_bytes())
+
+    kwargs = {}
+    if host_max_bytes is not None:
+        kwargs["host_max_bytes"] = host_max_bytes
+    return Agent(
+        state_dir=tmp_path,
+        source=StubSource(_coupled_update()),
+        gate=StubGate(),
+        health_factory=lambda version: StubHealth([True]),
+        target=TARGET,
+        flash=lambda artifact, target: None,
+        fetch=fetch,
+        verify=lambda manifest, path, last_sequence: None,
+        router_stopped=_fake_router_stopped,
+        apply_host=lambda archive, live: None,
+        host_dir=host_dir,
+        **kwargs,
+    )
+
+
+def test_disk_preflight_reserves_room_for_the_host_tarball(tmp_path, monkeypatch):
+    seen = _spy_disk(monkeypatch)
+    agent = _coupled_agent(tmp_path, host_dir=tmp_path / "opt" / "app")
+
+    assert agent.run_once() == Phase.COMMITTED
+    assert (tmp_path, TARGET.max_size + MAX_PAYLOAD_BYTES) in seen
+
+
+def test_disk_preflight_checks_the_host_directorys_filesystem_too(tmp_path, monkeypatch):
+    # --host-dir routinely names a different mount from --state-dir, and
+    # room on one says nothing about room on the other: the tarball is
+    # staged next to state.json but unpacked over there.
+    host_dir = tmp_path / "opt" / "app"
+    seen = _spy_disk(monkeypatch)
+    agent = _coupled_agent(tmp_path, host_dir=host_dir)
+
+    assert agent.run_once() == Phase.COMMITTED
+    assert (host_dir, MAX_PAYLOAD_BYTES) in seen
+
+
+def test_disk_preflight_reserves_nothing_extra_for_an_mcu_only_update(tmp_path, monkeypatch):
+    seen = _spy_disk(monkeypatch)
+    agent = _agent(tmp_path, StubSource(_update()), StubGate(), StubHealth([True]))
+
+    assert agent.run_once() == Phase.COMMITTED
+    assert seen == [(tmp_path, TARGET.max_size)]
+
+
+def test_the_host_reserve_is_configurable(tmp_path, monkeypatch):
+    # An integrator whose fetch allows larger tarballs must be able to say so
+    # here too, or the check reserves less room than the download can use.
+    seen = _spy_disk(monkeypatch)
+    agent = _coupled_agent(tmp_path, host_dir=tmp_path / "opt", host_max_bytes=64_000_000)
+
+    assert agent.run_once() == Phase.COMMITTED
+    assert (tmp_path, TARGET.max_size + 64_000_000) in seen

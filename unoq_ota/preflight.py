@@ -13,6 +13,14 @@ from unoq_ota.flasher import read_resident_header
 
 log = logging.getLogger(__name__)
 
+# The largest single payload this package is willing to write to disk: the
+# cap `unoq_ota.sources.http_manifest.download` enforces while fetching, and
+# therefore the amount of room the disk check has to reserve for a payload
+# whose real size is not known before it arrives. It lives here, with the
+# space checks, so a site that raises the download cap cannot silently leave
+# the preflight reserving less than a fetch is allowed to use.
+MAX_PAYLOAD_BYTES = 4_000_000
+
 
 class PreflightError(Exception):
     """The device is not in a fit state to take an update right now."""

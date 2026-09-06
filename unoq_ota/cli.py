@@ -20,6 +20,7 @@ from unoq_ota.flasher import read_partition
 from unoq_ota.gates.always import AlwaysGate
 from unoq_ota.health.version_report import VersionReportHealthCheck
 from unoq_ota.keyring import load_keyring
+from unoq_ota.preflight import MAX_PAYLOAD_BYTES
 from unoq_ota.reconciler import reconcile
 from unoq_ota.sources.http_manifest import HttpManifestSource, download
 from unoq_ota.sources.local import LocalFileSource
@@ -46,7 +47,9 @@ def _load_public_keys(keys_dir: Path) -> dict:
     return keys
 
 
-def _fetch(url: str, dest: Path, source_dir: Path | None) -> None:
+def _fetch(
+    url: str, dest: Path, source_dir: Path | None, max_bytes: int = MAX_PAYLOAD_BYTES
+) -> None:
     """Fetch an artifact named by a manifest's `artifact.url`.
 
     An http(s) URL is downloaded with `unoq_ota.sources.http_manifest`'s own
@@ -61,7 +64,7 @@ def _fetch(url: str, dest: Path, source_dir: Path | None) -> None:
     """
     scheme = urlsplit(url).scheme
     if scheme in ("http", "https"):
-        download(url, dest)
+        download(url, dest, max_bytes=max_bytes)
         return
     if scheme not in ("", "file"):
         raise ValueError(
@@ -165,18 +168,24 @@ def _run(args, run_parser: argparse.ArgumentParser) -> int:
     # check and was poisoned keeps being offered and re-downloaded forever.
     store = StateStore(Path(args.state_dir) / "state.json")
 
+    # One number, two places: the cap the fetch enforces while writing a
+    # payload and the room the disk preflight reserves for one. They are the
+    # same policy, and a site whose host tarball is bigger than the default
+    # has to be able to raise both together.
+    max_payload = getattr(args, "max_payload_bytes", None) or MAX_PAYLOAD_BYTES
+
     if args.source == "local":
         if not args.source_dir:
             run_parser.error("--source local requires --source-dir")
         source = LocalFileSource(args.source_dir, poisoned=store.is_poisoned)
-        fetch = lambda url, dest: _fetch(url, dest, args.source_dir)  # noqa: E731
+        fetch = lambda url, dest: _fetch(url, dest, args.source_dir, max_payload)  # noqa: E731
     else:
         if not args.manifest_url:
             run_parser.error("--source http requires --manifest-url")
         source = HttpManifestSource(
             args.manifest_url, poisoned=store.is_poisoned, jitter_s=args.jitter
         )
-        fetch = lambda url, dest: _fetch(url, dest, None)  # noqa: E731
+        fetch = lambda url, dest: _fetch(url, dest, None, max_payload)  # noqa: E731
 
     source = ReportingSource(source, _event_log(args))
     host_restart, host_health = _host_hooks(args)
@@ -193,6 +202,7 @@ def _run(args, run_parser: argparse.ArgumentParser) -> int:
         host_dir=host_dir,
         host_restart=host_restart,
         host_health=host_health,
+        host_max_bytes=max_payload,
     )
 
     while True:
@@ -267,6 +277,15 @@ def main(argv=None) -> int:
         type=Path,
         default=None,
         help="directory to unpack host_payload into (default: <state-dir>/host)",
+    )
+    run.add_argument(
+        "--max-payload-bytes",
+        type=int,
+        default=MAX_PAYLOAD_BYTES,
+        help=(
+            "largest artifact or host_payload this agent will download, and the "
+            f"room reserved for one in the disk preflight (default: {MAX_PAYLOAD_BYTES})"
+        ),
     )
     run.add_argument(
         "--host-unit",

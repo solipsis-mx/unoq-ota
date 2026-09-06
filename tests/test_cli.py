@@ -85,7 +85,7 @@ def test_load_public_keys_skips_a_garbage_key_file_without_crashing(tmp_path):
 def test_fetch_dispatches_http_scheme_to_download(monkeypatch, tmp_path):
     calls = []
 
-    def fake_download(url, dest):
+    def fake_download(url, dest, max_bytes=None):
         calls.append((url, dest))
         dest.write_bytes(b"payload")
 
@@ -100,7 +100,9 @@ def test_fetch_dispatches_http_scheme_to_download(monkeypatch, tmp_path):
 
 def test_fetch_dispatches_https_scheme_to_download(monkeypatch, tmp_path):
     calls = []
-    monkeypatch.setattr(cli, "download", lambda url, dest: calls.append((url, dest)))
+    monkeypatch.setattr(
+        cli, "download", lambda url, dest, max_bytes=None: calls.append((url, dest))
+    )
     dest = tmp_path / "out.bin"
 
     cli._fetch("https://example.invalid/a.bin", dest, None)
@@ -190,6 +192,7 @@ def _run_args(tmp_path, **overrides):
         host_dir=None,
         host_unit=None,
         core_root=None,
+        max_payload_bytes=None,
     )
     defaults.update(overrides)
     return argparse.Namespace(**defaults)
@@ -489,3 +492,53 @@ def test_run_honours_the_core_root(monkeypatch, tmp_path):
     args = _run_args(tmp_path, source_dir=source_dir, core_root=core_root)
     assert cli._run(args, argparse.ArgumentParser()) == 0
     assert seen == [core_root]
+
+
+# ---------------------------------------------------------------------------
+# --max-payload-bytes -- one knob for "how big may a payload be". A sketch is
+# bounded by its partition, but a host tarball is bounded only by what this
+# package is willing to write, and 4 MB of default is a guess about someone
+# else's application. The fetch cap and the disk reserve are the same policy
+# seen from two sides, so one flag has to move both or the pair drifts.
+# ---------------------------------------------------------------------------
+
+
+def test_fetch_passes_the_payload_cap_to_the_downloader(monkeypatch, tmp_path):
+    seen = {}
+
+    def fake_download(url, dest, max_bytes=None):
+        seen["max_bytes"] = max_bytes
+
+    monkeypatch.setattr(cli, "download", fake_download)
+    cli._fetch("http://example.invalid/a.bin", tmp_path / "a.bin", None, max_bytes=123)
+
+    assert seen["max_bytes"] == 123
+
+
+def test_run_wires_the_payload_cap_into_the_agent(monkeypatch, tmp_path):
+    source_dir = tmp_path / "src"
+    source_dir.mkdir()
+    (source_dir / "manifest.json").write_text(json.dumps(_manifest()))
+
+    captured: dict = {}
+    monkeypatch.setattr(cli, "resolve_flash_target", _fake_target)
+    _patch_agent(monkeypatch, captured)
+
+    args = _run_args(tmp_path, source_dir=source_dir, max_payload_bytes=64_000_000)
+    assert cli._run(args, argparse.ArgumentParser()) == 0
+    assert captured["host_max_bytes"] == 64_000_000
+
+
+def test_payload_cap_defaults_to_the_packages_own_limit(monkeypatch, tmp_path):
+    from unoq_ota.preflight import MAX_PAYLOAD_BYTES
+
+    source_dir = tmp_path / "src"
+    source_dir.mkdir()
+    (source_dir / "manifest.json").write_text(json.dumps(_manifest()))
+
+    captured: dict = {}
+    monkeypatch.setattr(cli, "resolve_flash_target", _fake_target)
+    _patch_agent(monkeypatch, captured)
+
+    assert cli._run(_run_args(tmp_path, source_dir=source_dir), argparse.ArgumentParser()) == 0
+    assert captured["host_max_bytes"] == MAX_PAYLOAD_BYTES

@@ -51,6 +51,7 @@ from unoq_ota.artifact import ArtifactError, load_artifact
 from unoq_ota.flasher import FlashError, router_stopped as _real_router_stopped, write_sketch
 from unoq_ota.host import HostError, apply_host_tree, rollback_host_tree
 from unoq_ota.interfaces import Status
+from unoq_ota.preflight import MAX_PAYLOAD_BYTES
 from unoq_ota.state import MAX_ATTEMPTS, Phase, StateStore
 from unoq_ota.verify import VerificationError
 
@@ -93,6 +94,7 @@ class Agent:
         host_restart: Callable[[], None] | None = None,
         host_health: Callable[[], bool] | None = None,
         host_dir: Path | None = None,
+        host_max_bytes: int = MAX_PAYLOAD_BYTES,
     ):
         if fetch is None:
             # A missing `fetch` is a construction mistake, not a runtime
@@ -118,6 +120,7 @@ class Agent:
         self._host_restart = host_restart
         self._host_health = host_health
         self.host_dir = Path(host_dir) if host_dir is not None else self.state_dir / "host"
+        self.host_max_bytes = host_max_bytes
         self.store = StateStore(self.state_dir / "state.json")
 
     def _default_verify(self, manifest: dict, path: Path, last_sequence: int) -> None:
@@ -318,7 +321,27 @@ class Agent:
             # declared size is added after verification -- that later check
             # already covers the trusted-data case with a stronger signal
             # (the real bytes) than the manifest's own claim about them.
-            check_disk_space(self.state_dir, self.target.max_size)
+            #
+            # A coupled host tarball is staged next to state.json before it
+            # is unpacked, so it needs room here too. The reserve is
+            # `self.host_max_bytes` -- the cap the fetch is allowed to
+            # write -- and deliberately *not* the manifest's declared
+            # `host_payload.size`, for the same reason the sketch bound
+            # above ignores `artifact.size`: a served manifest can claim any
+            # number, and an inflated one would park every cycle in the
+            # PreflightError branch below, which never counts an attempt and
+            # never poisons, so nothing would ever stop the loop.
+            host_bytes = self.host_max_bytes if self._host_block(update) is not None else 0
+            check_disk_space(self.state_dir, self.target.max_size + host_bytes)
+            if host_bytes:
+                # --host-dir routinely names a different filesystem from
+                # --state-dir (an app tree under /opt, state under /var), and
+                # free space on one says nothing about the other. The unpacked
+                # tree is larger than the tarball it came from and the previous
+                # tree is kept alongside it for rollback; both are absorbed by
+                # check_disk_space's own margin rather than guessed at with a
+                # compression ratio this package cannot know.
+                check_disk_space(self.host_dir, host_bytes)
         except PreflightError as exc:
             # Not the update's fault: do not count an attempt and do not
             # poison. Unlike the fetch/verify failure branches below, no

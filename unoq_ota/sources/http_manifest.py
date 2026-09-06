@@ -16,13 +16,14 @@ from pathlib import Path
 import requests
 
 from unoq_ota.interfaces import Status, Update
+from unoq_ota.preflight import MAX_PAYLOAD_BYTES
 
 log = logging.getLogger(__name__)
 
 DEFAULT_TIMEOUT_S = 30.0
 
 
-def download(url: str, dest: Path, session=None, max_bytes: int = 4_000_000) -> Path:
+def download(url: str, dest: Path, session=None, max_bytes: int = MAX_PAYLOAD_BYTES) -> Path:
     """Stream a URL to disk with a hard size cap.
 
     Removes `dest` on any failure -- the size cap, a dropped connection, a

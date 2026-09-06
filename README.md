@@ -33,7 +33,10 @@ do it while the board sits somewhere inconvenient. That's this project.
 - Optionally unpacks a signed `host_payload` tarball into a directory you
   choose (`--host-dir`) and restarts a systemd unit you name (`--host-unit`).
   MCU and host are one transaction: if either side fails health, both roll back.
-  Omit `host_payload` and the update is MCU-only.
+  Omit `host_payload` and the update is MCU-only. `--max-payload-bytes` sets
+  how large a download may be and how much room the disk preflight reserves
+  for one; the 4 MB default is a guess about your application, not a limit of
+  the format.
 - Checks that the new firmware actually came up, and **rolls back if it
   didn't**.
 - Recovers a device whose flash was interrupted by power loss, on the next
