@@ -25,7 +25,7 @@ from unoq_ota.reconciler import reconcile
 from unoq_ota.sources.http_manifest import HttpManifestSource, download
 from unoq_ota.sources.local import LocalFileSource
 from unoq_ota.sources.reporting import ReportingSource
-from unoq_ota.state import DEFAULT_STATE_DIR, StateStore
+from unoq_ota.state import DEFAULT_STATE_DIR, StateError, StateStore
 
 log = logging.getLogger(__name__)
 
@@ -213,6 +213,43 @@ def _run(args, run_parser: argparse.ArgumentParser) -> int:
         time.sleep(args.poll_interval)
 
 
+def _dispatch(args, run_parser: argparse.ArgumentParser) -> int:
+    if args.command == "target":
+        print(resolve_flash_target(args.core_root))
+        return 0
+
+    if args.command == "validate":
+        artifact = load_artifact(args.artifact)
+        print(f"OK  size={artifact.size}  sha256={artifact.sha256}")
+        return 0
+
+    if args.command == "backup":
+        target = resolve_flash_target(args.core_root)
+        read_partition(args.out, target.address, args.length)
+        print(f"dumped {args.length} bytes to {args.out}")
+        return 0
+
+    if args.command == "status":
+        return _print_status(args)
+
+    if args.command == "reconcile":
+        target = resolve_flash_target(args.core_root)
+        health = VersionReportHealthCheck()
+        result = reconcile(args.state_dir, health, target)
+        _event_log(args).record(
+            kind="reconcile",
+            action=result.action,
+            image=result.image,
+            healthy=result.healthy,
+        )
+        print(f"healthy={result.healthy} action={result.action} image={result.image}")
+        return 0 if result.healthy else 1
+
+    if args.command == "run":
+        return _run(args, run_parser)
+
+    return 2
+
 
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(prog="unoq-ota")
@@ -299,41 +336,14 @@ def main(argv=None) -> int:
         format="%(levelname)s %(name)s: %(message)s",
     )
 
-    if args.command == "target":
-        print(resolve_flash_target(args.core_root))
-        return 0
-
-    if args.command == "validate":
-        artifact = load_artifact(args.artifact)
-        print(f"OK  size={artifact.size}  sha256={artifact.sha256}")
-        return 0
-
-    if args.command == "backup":
-        target = resolve_flash_target(args.core_root)
-        read_partition(args.out, target.address, args.length)
-        print(f"dumped {args.length} bytes to {args.out}")
-        return 0
-
-    if args.command == "status":
-        return _print_status(args)
-
-    if args.command == "reconcile":
-        target = resolve_flash_target(args.core_root)
-        health = VersionReportHealthCheck()
-        result = reconcile(args.state_dir, health, target)
-        _event_log(args).record(
-            kind="reconcile",
-            action=result.action,
-            image=result.image,
-            healthy=result.healthy,
-        )
-        print(f"healthy={result.healthy} action={result.action} image={result.image}")
-        return 0 if result.healthy else 1
-
-    if args.command == "run":
-        return _run(args, run)
-
-    return 2
+    try:
+        return _dispatch(args, run)
+    except StateError as exc:
+        # The one condition where the agent's own state is present but
+        # unreadable. It is an ownership problem on the device, not a bug to
+        # hand back as a stack trace.
+        log.error("%s", exc)
+        return 1
 
 
 if __name__ == "__main__":

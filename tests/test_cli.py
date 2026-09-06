@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import base64
 import json
+import logging
 
 import pytest
 from cryptography.hazmat.primitives import serialization
@@ -542,3 +543,20 @@ def test_payload_cap_defaults_to_the_packages_own_limit(monkeypatch, tmp_path):
 
     assert cli._run(_run_args(tmp_path, source_dir=source_dir), argparse.ArgumentParser()) == 0
     assert captured["host_max_bytes"] == MAX_PAYLOAD_BYTES
+
+
+def test_status_reports_an_unreadable_state_file_without_a_traceback(monkeypatch, tmp_path, caplog):
+    # A root-run service leaves root-owned state; a later non-root `status`
+    # should say so in one line, not dump a stack trace at an operator who
+    # is probably already having a bad day.
+    from unoq_ota.state import StateError
+
+    def boom(self):
+        raise StateError("cannot read /var/lib/unoq-ota/state.json: Permission denied")
+
+    monkeypatch.setattr(StateStore, "load", boom)
+
+    with caplog.at_level(logging.ERROR, logger="unoq_ota.cli"):
+        assert cli.main(["--state-dir", str(tmp_path), "status"]) == 1
+
+    assert "Permission denied" in caplog.text

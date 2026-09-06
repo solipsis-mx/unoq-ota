@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import json
+import os
 
 import pytest
 
-from unoq_ota.state import MAX_ATTEMPTS, Phase, State, StateStore
+from unoq_ota.state import MAX_ATTEMPTS, Phase, State, StateError, StateStore
 
 
 def test_returns_a_default_state_when_no_file_exists(tmp_path):
@@ -250,3 +251,28 @@ def test_write_failure_propagates_leaves_no_tmp_file_and_preserves_existing_stat
 
     assert list(tmp_path.glob("*.tmp")) == []
     assert path.read_text() == original_contents
+
+
+def test_load_treats_an_absent_file_as_a_fresh_device(tmp_path):
+    assert StateStore(tmp_path / "state.json").load() == State()
+
+
+def test_load_refuses_to_invent_a_fresh_state_for_a_file_it_cannot_read(tmp_path):
+    # Found on the bench: running the poller as root against a state dir
+    # owned by the interactive user leaves state.json root-owned, and a
+    # later non-root run could not read it. Defaulting here would report a
+    # device with no poison list, no sequence and no committed version --
+    # so a version that already failed its health check gets offered again
+    # and the rollback ancestry is gone. Absent and unreadable are not the
+    # same fact, and only one of them is safe to treat as "brand new".
+    path = tmp_path / "state.json"
+    path.write_text(json.dumps({"sequence": 7, "poisoned": ["bad"]}))
+    path.chmod(0o000)
+
+    try:
+        if os.access(path, os.R_OK):
+            pytest.skip("this user can read a mode-000 file; the case cannot be staged")
+        with pytest.raises(StateError, match="state.json"):
+            StateStore(path).load()
+    finally:
+        path.chmod(0o600)

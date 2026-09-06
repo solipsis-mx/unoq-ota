@@ -101,14 +101,40 @@ def _sanitize_sequence(value: object) -> int:
         return 0
 
 
+class StateError(Exception):
+    """The state file is there, but this process cannot read it."""
+
+
 class StateStore:
     def __init__(self, path: Path):
         self.path = Path(path)
 
     def load(self) -> State:
         try:
-            raw = json.loads(self.path.read_text())
-        except (OSError, ValueError):
+            text = self.path.read_text()
+        except FileNotFoundError:
+            # A device that has never taken an update. The only OSError that
+            # legitimately means "fresh".
+            return State()
+        except OSError as exc:
+            # Everything else -- EACCES above all -- means the file is there
+            # and says something we cannot see. Returning defaults here would
+            # announce a device with no poison list, no sequence and no
+            # committed version: a version that already failed its health
+            # check would be offered again, and the rollback ancestry that
+            # names what to restore would be gone. Loud beats silently wrong.
+            raise StateError(
+                f"cannot read {self.path}: {exc}. This is not the same as no "
+                "state at all, so it is not treated as a fresh device. Check "
+                "ownership -- a service running as root leaves root-owned "
+                "files that a later non-root run cannot read."
+            ) from exc
+        try:
+            raw = json.loads(text)
+        except ValueError:
+            # Corrupt content, on the other hand, carries no recoverable
+            # facts at all; defaults are the only thing left, and the
+            # reconciler is documented to keep working in exactly this case.
             return State()
         if not isinstance(raw, dict):
             # Valid JSON but not an object -- e.g. `[]`, `"hello"`, `null`.
