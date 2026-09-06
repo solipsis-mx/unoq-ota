@@ -155,7 +155,7 @@ def _run(args, run_parser: argparse.ArgumentParser) -> int:
     deployment. Everything else -- Agent, the sources, the health check --
     stays deployment-agnostic.
     """
-    target = resolve_flash_target()
+    target = resolve_flash_target(getattr(args, "core_root", None))
     public_keys = _load_public_keys(args.keys_dir)
     # Shared with the Agent's own internal StateStore, which is created at
     # the same `state_dir / "state.json"` path (see unoq_ota/agent.py). This
@@ -214,6 +214,20 @@ def main(argv=None) -> int:
         help="POST each OTA event as JSON (also reads UNOQ_OTA_REPORT_URL)",
     )
     parser.add_argument(
+        "--core-root",
+        type=Path,
+        default=(
+            Path(os.environ["UNOQ_OTA_CORE_ROOT"])
+            if os.environ.get("UNOQ_OTA_CORE_ROOT")
+            else None
+        ),
+        help=(
+            "Arduino installation holding the zephyr core: the core directory, "
+            "an .arduino15 directory, or the home directory that owns one "
+            "(default: $HOME/.arduino15/..., also reads UNOQ_OTA_CORE_ROOT)"
+        ),
+    )
+    parser.add_argument(
         "--device-id",
         default=os.environ.get("UNOQ_OTA_DEVICE_ID"),
         help="identity in journal and reports (default: hostname, or UNOQ_OTA_DEVICE_ID)",
@@ -267,7 +281,7 @@ def main(argv=None) -> int:
     )
 
     if args.command == "target":
-        print(resolve_flash_target())
+        print(resolve_flash_target(args.core_root))
         return 0
 
     if args.command == "validate":
@@ -276,7 +290,7 @@ def main(argv=None) -> int:
         return 0
 
     if args.command == "backup":
-        target = resolve_flash_target()
+        target = resolve_flash_target(args.core_root)
         read_partition(args.out, target.address, args.length)
         print(f"dumped {args.length} bytes to {args.out}")
         return 0
@@ -285,7 +299,7 @@ def main(argv=None) -> int:
         return _print_status(args)
 
     if args.command == "reconcile":
-        target = resolve_flash_target()
+        target = resolve_flash_target(args.core_root)
         health = VersionReportHealthCheck()
         result = reconcile(args.state_dir, health, target)
         _event_log(args).record(

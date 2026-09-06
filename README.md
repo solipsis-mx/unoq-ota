@@ -26,7 +26,10 @@ do it while the board sits somewhere inconvenient. That's this project.
 - Verifies signature, digest, board compatibility, and the sketch header
   **before** the MCU is touched at all.
 - Flashes only the sketch partition, locally over SWD — the network is never in
-  the loop during the write.
+  the loop during the write. The offset comes from the Arduino core installed
+  on the board, never a constant; point the agent at that installation with
+  `--core-root` (or `UNOQ_OTA_CORE_ROOT`) when it is not under the running
+  account's `$HOME` — which is exactly the case under `systemd`'s `User=root`.
 - Optionally unpacks a signed `host_payload` tarball into a directory you
   choose (`--host-dir`) and restarts a systemd unit you name (`--host-unit`).
   MCU and host are one transaction: if either side fails health, both roll back.

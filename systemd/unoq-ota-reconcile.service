@@ -8,11 +8,16 @@ Before=unoq-ota.service
 Type=oneshot
 # EnvironmentFile is optional: a missing file is ignored (`-`). Set
 # UNOQ_OTA_REPORT_URL so a boot recovery is visible to the publisher,
-# not only in journalctl.
+# not only in journalctl. Set UNOQ_OTA_CORE_ROOT there to name the Arduino
+# installation directly (the core directory, an .arduino15 directory, or the
+# home directory that owns one) -- it wins over HOME below, so a board whose
+# core lives anywhere other than the path this unit guesses needs no edit to
+# the unit itself, only a line in the environment file.
 EnvironmentFile=-/etc/unoq-ota/agent.env
 # User=root makes Path.home() /root. The Zephyr core lives in the
-# interactive account's ~/.arduino15; without this, reconcile crashes
-# before it can even look at the MCU.
+# interactive account's ~/.arduino15; without this or UNOQ_OTA_CORE_ROOT,
+# reconcile crashes before it can even look at the MCU. /home/arduino is
+# the stock image's interactive account -- a default, not a requirement.
 Environment=HOME=/home/arduino
 ExecStart=/usr/local/bin/unoq-ota reconcile
 RemainAfterExit=yes

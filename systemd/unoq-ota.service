@@ -15,6 +15,11 @@ Type=simple
 #   ExecStart=/usr/local/bin/unoq-ota run --source http --manifest-url https://example.invalid/manifest.json --keys-dir /etc/unoq-ota/keys
 # Optional: UNOQ_OTA_REPORT_URL and UNOQ_OTA_DEVICE_ID in
 # /etc/unoq-ota/agent.env so every status POST includes a stable identity.
+# Also optional there: UNOQ_OTA_CORE_ROOT, the Arduino installation holding
+# the zephyr core (the core directory, an .arduino15 directory, or the home
+# directory that owns one). Without it the core is looked up under HOME,
+# which for User=root is /root -- not where a core is normally installed.
+# `--core-root PATH` on the drop-in's ExecStart does the same thing.
 EnvironmentFile=-/etc/unoq-ota/agent.env
 ExecStart=/usr/local/bin/unoq-ota run
 Restart=always

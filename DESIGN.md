@@ -68,6 +68,14 @@ Read the offset from the Arduino core installed on the board:
 This is the same source of truth the IDE uses, it requires no halt of the MCU,
 and it stays correct across core upgrades.
 
+Which `~` that is matters. Under `systemd` with `User=root`, `$HOME` is
+`/root`, while the core is installed under whichever account ran
+`arduino-cli core install`. So the search root is resolved per call, not at
+import, and can be named explicitly with `--core-root` or
+`UNOQ_OTA_CORE_ROOT` — as the core directory itself, as an `.arduino15`
+directory, or as the home directory that owns one. A failure names every
+path that was tried.
+
 ## Safety model
 
 This is the most important section. Read it before trusting this software with

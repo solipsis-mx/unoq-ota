@@ -160,7 +160,7 @@ def test_fetch_raises_a_clear_error_on_an_unsupported_scheme(tmp_path):
 # ---------------------------------------------------------------------------
 
 
-def _fake_target():
+def _fake_target(core_root=None):
     return FlashTarget(address=0x08100000, max_size=786432, core_version="1.0.0")
 
 
@@ -189,6 +189,7 @@ def _run_args(tmp_path, **overrides):
         device_id=None,
         host_dir=None,
         host_unit=None,
+        core_root=None,
     )
     defaults.update(overrides)
     return argparse.Namespace(**defaults)
@@ -415,3 +416,76 @@ def test_run_wraps_the_source_so_reports_land_in_the_journal(monkeypatch, tmp_pa
     row = json.loads((tmp_path / "state" / JOURNAL_NAME).read_text().splitlines()[-1])
     assert row["status"] == "committed"
     assert row["device"] == "unoq2"
+
+
+# ---------------------------------------------------------------------------
+# --core-root -- pointing the agent at an Arduino installation that is not
+# under the running account's home. Without it the only lever is HOME, which
+# forces a unit file to name one distribution's interactive user.
+# ---------------------------------------------------------------------------
+
+
+def _recording_target(seen):
+    def resolve(core_root=None):
+        seen.append(core_root)
+        return _fake_target()
+
+    return resolve
+
+
+def test_core_root_flag_reaches_the_flash_target_resolver(monkeypatch, tmp_path, capsys):
+    seen = []
+    monkeypatch.setattr(cli, "resolve_flash_target", _recording_target(seen))
+
+    assert cli.main(["--core-root", str(tmp_path), "target"]) == 0
+    assert seen == [tmp_path]
+
+
+def test_core_root_defaults_to_the_environment(monkeypatch, tmp_path, capsys):
+    seen = []
+    monkeypatch.setattr(cli, "resolve_flash_target", _recording_target(seen))
+    monkeypatch.setenv("UNOQ_OTA_CORE_ROOT", str(tmp_path))
+
+    assert cli.main(["target"]) == 0
+    assert seen == [tmp_path]
+
+
+def test_core_root_is_unset_by_default(monkeypatch, capsys):
+    seen = []
+    monkeypatch.setattr(cli, "resolve_flash_target", _recording_target(seen))
+    monkeypatch.delenv("UNOQ_OTA_CORE_ROOT", raising=False)
+
+    assert cli.main(["target"]) == 0
+    assert seen == [None]
+
+
+def test_reconcile_honours_the_core_root(monkeypatch, tmp_path):
+    from unoq_ota.reconciler import ReconcileResult
+
+    seen = []
+    monkeypatch.setattr(cli, "resolve_flash_target", _recording_target(seen))
+    monkeypatch.setattr(
+        cli,
+        "reconcile",
+        lambda state_dir, health, target: ReconcileResult(healthy=True, action="none"),
+    )
+
+    core_root = tmp_path / "core"
+    assert cli.main(["--state-dir", str(tmp_path), "--core-root", str(core_root), "reconcile"]) == 0
+    assert seen == [core_root]
+
+
+def test_run_honours_the_core_root(monkeypatch, tmp_path):
+    source_dir = tmp_path / "src"
+    source_dir.mkdir()
+    (source_dir / "manifest.json").write_text(json.dumps(_manifest()))
+
+    seen = []
+    captured: dict = {}
+    monkeypatch.setattr(cli, "resolve_flash_target", _recording_target(seen))
+    _patch_agent(monkeypatch, captured)
+
+    core_root = tmp_path / "core"
+    args = _run_args(tmp_path, source_dir=source_dir, core_root=core_root)
+    assert cli._run(args, argparse.ArgumentParser()) == 0
+    assert seen == [core_root]
