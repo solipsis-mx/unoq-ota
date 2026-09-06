@@ -362,13 +362,13 @@ def test_status_json_reads_state_and_the_journal(tmp_path, capsys):
             sequence=1,
         )
     )
-    EventLog(tmp_path / JOURNAL_NAME, device_id="unoq2").record(
+    EventLog(tmp_path / JOURNAL_NAME, device_id="board-1").record(
         kind="update", version="bench-wifi-1", status="committed", detail="healthy"
     )
 
-    assert cli.main(["--state-dir", str(tmp_path), "--device-id", "unoq2", "status", "--json"]) == 0
+    assert cli.main(["--state-dir", str(tmp_path), "--device-id", "board-1", "status", "--json"]) == 0
     payload = json.loads(capsys.readouterr().out)
-    assert payload["device"] == "unoq2"
+    assert payload["device"] == "board-1"
     assert payload["phase"] == "committed"
     assert payload["committed_version"] == "bench-wifi-1"
     assert payload["last_event"]["status"] == "committed"
@@ -384,7 +384,7 @@ def test_reconcile_records_an_event_in_the_journal(monkeypatch, tmp_path):
     monkeypatch.setattr(cli, "reconcile", fake_reconcile)
     monkeypatch.setattr(cli, "resolve_flash_target", _fake_target)
 
-    assert cli.main(["--state-dir", str(tmp_path), "--device-id", "unoq2", "reconcile"]) == 0
+    assert cli.main(["--state-dir", str(tmp_path), "--device-id", "board-1", "reconcile"]) == 0
     lines = (tmp_path / JOURNAL_NAME).read_text().splitlines()
     row = json.loads(lines[-1])
     assert row["kind"] == "reconcile"
@@ -408,7 +408,7 @@ def test_run_wraps_the_source_so_reports_land_in_the_journal(monkeypatch, tmp_pa
     args = _run_args(
         tmp_path,
         source_dir=source_dir,
-        device_id="unoq2",
+        device_id="board-1",
         report_url=None,
     )
     assert cli._run(args, argparse.ArgumentParser()) == 0
@@ -419,7 +419,7 @@ def test_run_wraps_the_source_so_reports_land_in_the_journal(monkeypatch, tmp_pa
     source.report(update, Status.COMMITTED, "healthy")
     row = json.loads((tmp_path / "state" / JOURNAL_NAME).read_text().splitlines()[-1])
     assert row["status"] == "committed"
-    assert row["device"] == "unoq2"
+    assert row["device"] == "board-1"
 
 
 # ---------------------------------------------------------------------------

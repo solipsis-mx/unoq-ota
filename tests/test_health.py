@@ -183,14 +183,14 @@ def test_tcp_monitor_retries_a_refused_connection_until_the_port_opens():
         server.listen(1)
         conn, _ = server.accept()
         try:
-            conn.sendall(b"OTA-HEALTH bench-host-6 seq=1\nOTA-HEALTH bench-host-6 seq=2\n")
+            conn.sendall(b"OTA-HEALTH test-1.0.0 seq=1\nOTA-HEALTH test-1.0.0 seq=2\n")
             time.sleep(0.2)
         finally:
             conn.close()
             server.close()
 
     threading.Thread(target=serve, daemon=True).start()
-    check = VersionReportHealthCheck("bench-host-6", monitor_addr=("127.0.0.1", port))
+    check = VersionReportHealthCheck("test-1.0.0", monitor_addr=("127.0.0.1", port))
 
     assert check.wait_healthy(8) is True
 
@@ -206,7 +206,7 @@ def test_tcp_monitor_stops_retrying_at_the_deadline():
     port = probe.getsockname()[1]
     probe.close()
 
-    check = VersionReportHealthCheck("bench-host-6", monitor_addr=("127.0.0.1", port))
+    check = VersionReportHealthCheck("test-1.0.0", monitor_addr=("127.0.0.1", port))
     started = time.monotonic()
 
     assert check.wait_healthy(1.5) is False

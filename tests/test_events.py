@@ -36,13 +36,13 @@ class FakeSession:
 
 
 def test_record_appends_one_json_line(tmp_path):
-    log = EventLog(tmp_path / JOURNAL_NAME, device_id="unoq2")
+    log = EventLog(tmp_path / JOURNAL_NAME, device_id="board-1")
     log.record(kind="update", version="1.0.0", status="committed", detail="healthy")
 
     lines = (tmp_path / JOURNAL_NAME).read_text().splitlines()
     assert len(lines) == 1
     row = json.loads(lines[0])
-    assert row["device"] == "unoq2"
+    assert row["device"] == "board-1"
     assert row["kind"] == "update"
     assert row["version"] == "1.0.0"
     assert row["status"] == "committed"
@@ -51,7 +51,7 @@ def test_record_appends_one_json_line(tmp_path):
 
 
 def test_record_does_not_raise_when_the_journal_cannot_be_written(tmp_path, monkeypatch):
-    log = EventLog(tmp_path / JOURNAL_NAME, device_id="unoq2")
+    log = EventLog(tmp_path / JOURNAL_NAME, device_id="board-1")
 
     def _raise(*args, **kwargs):
         raise OSError("disk full")
@@ -64,7 +64,7 @@ def test_posts_the_event_when_a_report_url_is_set(tmp_path):
     session = FakeSession()
     log = EventLog(
         tmp_path / JOURNAL_NAME,
-        device_id="unoq2",
+        device_id="board-1",
         report_url="http://example.invalid/ota",
         session=session,
     )
@@ -74,7 +74,7 @@ def test_posts_the_event_when_a_report_url_is_set(tmp_path):
     posted = session.posts[0]
     assert posted["url"] == "http://example.invalid/ota"
     assert posted["json"]["status"] == "committed"
-    assert posted["json"]["device"] == "unoq2"
+    assert posted["json"]["device"] == "board-1"
     assert posted["timeout"] == 5.0
 
 
@@ -82,7 +82,7 @@ def test_a_failed_post_does_not_raise_and_is_retried_on_the_next_record(tmp_path
     session = FakeSession(fail_times=1)
     log = EventLog(
         tmp_path / JOURNAL_NAME,
-        device_id="unoq2",
+        device_id="board-1",
         report_url="http://example.invalid/ota",
         session=session,
     )
@@ -93,7 +93,7 @@ def test_a_failed_post_does_not_raise_and_is_retried_on_the_next_record(tmp_path
 
 
 def test_last_returns_the_most_recent_event(tmp_path):
-    log = EventLog(tmp_path / JOURNAL_NAME, device_id="unoq2")
+    log = EventLog(tmp_path / JOURNAL_NAME, device_id="board-1")
     log.record(kind="update", version="1", status="flashing", detail="a")
     log.record(kind="reconcile", action="reflashed", image="current.bin", healthy=True)
 
@@ -105,7 +105,7 @@ def test_last_returns_the_most_recent_event(tmp_path):
 
 
 def test_last_returns_none_when_the_journal_is_missing(tmp_path):
-    log = EventLog(tmp_path / JOURNAL_NAME, device_id="unoq2")
+    log = EventLog(tmp_path / JOURNAL_NAME, device_id="board-1")
     assert log.last() is None
 
 
