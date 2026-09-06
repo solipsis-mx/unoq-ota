@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import subprocess
 from pathlib import Path
 
@@ -314,8 +315,20 @@ def test_read_resident_header_parses_the_header_from_the_dumped_bytes(tmp_path, 
 # ---------------------------------------------------------------------------
 
 
-def _completed(returncode):
-    return subprocess.CompletedProcess(args=[], returncode=returncode, stdout="", stderr="")
+def _completed(returncode, stderr=""):
+    return subprocess.CompletedProcess(args=[], returncode=returncode, stdout="", stderr=stderr)
+
+
+def _listing(unit="arduino-router"):
+    return ["systemctl", "list-dependencies", "--reverse", "--plain", "--no-pager", unit]
+
+
+def _stop(unit="arduino-router"):
+    return ["systemctl", "stop", "--job-mode=replace-irreversibly", unit]
+
+
+def _start(unit="arduino-router"):
+    return ["systemctl", "start", unit]
 
 
 def test_router_stopped_stops_then_restarts_on_success():
@@ -327,12 +340,9 @@ def test_router_stopped_stops_then_restarts_on_success():
 
     with router_stopped(run=fake_run) as stopped:
         assert stopped is True
-        assert calls == [["systemctl", "stop", "arduino-router"]]
+        assert calls == [_listing(), _stop()]
 
-    assert calls == [
-        ["systemctl", "stop", "arduino-router"],
-        ["systemctl", "start", "arduino-router"],
-    ]
+    assert calls == [_listing(), _stop(), _start()]
 
 
 def test_router_stopped_uses_the_given_unit_name():
@@ -345,10 +355,7 @@ def test_router_stopped_uses_the_given_unit_name():
     with router_stopped(run=fake_run, unit="other-router"):
         pass
 
-    assert calls == [
-        ["systemctl", "stop", "other-router"],
-        ["systemctl", "start", "other-router"],
-    ]
+    assert calls == [_listing("other-router"), _stop("other-router"), _start("other-router")]
 
 
 def test_router_stopped_flashes_anyway_when_stop_fails_and_does_not_restart():
@@ -362,7 +369,7 @@ def test_router_stopped_flashes_anyway_when_stop_fails_and_does_not_restart():
         assert stopped is False
 
     # Never actually stopped -- nothing to restart, and no start call at all.
-    assert calls == [["systemctl", "stop", "arduino-router"]]
+    assert calls == [_listing(), _stop()]
 
 
 def test_router_stopped_survives_systemctl_being_entirely_unrunnable():
@@ -390,10 +397,7 @@ def test_router_stopped_restarts_even_if_the_body_raises():
         with router_stopped(run=fake_run):
             raise FlashError("write failed")
 
-    assert calls == [
-        ["systemctl", "stop", "arduino-router"],
-        ["systemctl", "start", "arduino-router"],
-    ]
+    assert calls == [_listing(), _stop(), _start()]
 
 
 def test_router_stopped_survives_the_restart_itself_failing(monkeypatch):
@@ -411,10 +415,7 @@ def test_router_stopped_survives_the_restart_itself_failing(monkeypatch):
         with router_stopped(run=flaky_run):
             raise FlashError("write failed")
 
-    assert calls == [
-        ["systemctl", "stop", "arduino-router"],
-        ["systemctl", "start", "arduino-router"],
-    ]
+    assert calls == [_listing(), _stop(), _start()]
 
 
 def test_router_stopped_survives_systemctl_stop_hanging_past_its_timeout():
@@ -425,8 +426,12 @@ def test_router_stopped_survives_systemctl_stop_hanging_past_its_timeout():
     # than hanging the agent inside the flash window indefinitely or escaping
     # the context manager uncaught.
     def fake_run(cmd, **kwargs):
-        assert kwargs.get("timeout") == 30
-        raise subprocess.TimeoutExpired(cmd=cmd, timeout=30)
+        # Every invocation is bounded, per this module's own contract; the
+        # stop is the one this test is about, and it carries the 30s bound.
+        assert kwargs.get("timeout")
+        if "stop" in cmd:
+            assert kwargs["timeout"] == 30
+        raise subprocess.TimeoutExpired(cmd=cmd, timeout=kwargs["timeout"])
 
     with router_stopped(run=fake_run) as stopped:
         assert stopped is False
@@ -448,7 +453,116 @@ def test_router_stopped_survives_the_restart_itself_timing_out():
         with router_stopped(run=flaky_run):
             raise FlashError("write failed")
 
-    assert calls == [
-        ["systemctl", "stop", "arduino-router"],
-        ["systemctl", "start", "arduino-router"],
-    ]
+    assert calls == [_listing(), _stop(), _start()]
+
+
+def test_router_stopped_reports_why_the_stop_failed(caplog):
+    # Found on the bench: the agent logged "could not stop arduino-router;
+    # flashing anyway" and threw away the one line that says why, leaving no
+    # way to tell an authorisation problem from a missing unit or a unit
+    # that refuses to stop. Whatever systemctl said belongs in the warning.
+    def fake_run(cmd, **kwargs):
+        return _completed(1, stderr="Interactive authentication required.\n")
+
+    with caplog.at_level(logging.WARNING, logger="unoq_ota.flasher"):
+        with router_stopped(run=fake_run) as stopped:
+            assert stopped is False
+
+    assert "Interactive authentication required." in caplog.text
+
+
+def test_router_stopped_still_warns_when_systemctl_said_nothing(caplog):
+    def fake_run(cmd, **kwargs):
+        return _completed(1)
+
+    with caplog.at_level(logging.WARNING, logger="unoq_ota.flasher"):
+        with router_stopped(run=fake_run):
+            pass
+
+    assert "could not stop arduino-router" in caplog.text
+
+
+# ---------------------------------------------------------------------------
+# Making the stop stick.
+#
+# On the stock image `systemctl stop arduino-router` answers "Job for
+# arduino-router.service canceled": a sibling unit Requires= the router and
+# is Restart=always, so the propagated stop restarts it, which re-pulls the
+# router and cancels our job. The guard that exists to keep GPIO 38 still
+# during an erase was therefore doing nothing at all.
+# ---------------------------------------------------------------------------
+
+
+def _systemctl_fake(calls, *, deps="", active="", stop_rc=0):
+    """Stand in for systemctl: dependency listing, is-active, stop, start."""
+
+    def fake_run(cmd, **kwargs):
+        calls.append(cmd)
+        if "list-dependencies" in cmd:
+            return subprocess.CompletedProcess(
+                args=cmd, returncode=0 if deps else 1, stdout=deps, stderr=""
+            )
+        if "is-active" in cmd:
+            return subprocess.CompletedProcess(args=cmd, returncode=0, stdout=active, stderr="")
+        if "stop" in cmd:
+            return _completed(stop_rc)
+        return _completed(0)
+
+    return fake_run
+
+
+def test_router_stopped_makes_the_stop_irreversible():
+    calls = []
+
+    with router_stopped(run=_systemctl_fake(calls)):
+        pass
+
+    stop = [c for c in calls if "stop" in c][0]
+    assert "--job-mode=replace-irreversibly" in stop
+
+
+def test_router_stopped_restarts_the_units_its_stop_took_down():
+    # A stop that actually works propagates to everything that Requires= the
+    # router, and those do not come back on their own. Leaving them down
+    # costs the board its host communication -- the same reason the router
+    # itself is restarted in a finally block.
+    calls = []
+    fake = _systemctl_fake(
+        calls,
+        deps="arduino-router.service\nsibling.service\nother.service\nmulti-user.target\n",
+        active="active\ninactive\n",
+    )
+
+    with router_stopped(run=fake) as stopped:
+        assert stopped is True
+
+    start = [c for c in calls if "start" in c][-1]
+    assert "arduino-router" in start
+    assert "sibling.service" in start
+    assert "other.service" not in start  # was not running before the stop
+    assert "multi-user.target" not in start  # not a service
+
+
+def test_router_stopped_still_stops_when_dependencies_cannot_be_listed():
+    calls = []
+
+    with router_stopped(run=_systemctl_fake(calls)) as stopped:
+        assert stopped is True
+
+    assert [c for c in calls if "stop" in c]
+    assert [c for c in calls if "start" in c][-1] == ["systemctl", "start", "arduino-router"]
+
+
+def test_router_stopped_restarts_nothing_when_the_stop_failed():
+    calls = []
+    fake = _systemctl_fake(
+        calls,
+        deps="sibling.service\n",
+        active="active\n",
+        stop_rc=1,
+    )
+
+    with router_stopped(run=fake) as stopped:
+        assert stopped is False
+
+    assert [c for c in calls if "start" in c] == []

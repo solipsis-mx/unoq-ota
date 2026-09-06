@@ -188,6 +188,61 @@ def read_resident_header(address: int, timeout_s: float = 60.0) -> SketchHeader:
     return parse_header(tmp.read_bytes())
 
 
+def _running_dependents(run, unit: str, timeout: float = 15.0) -> list:
+    """Services that pull `unit` in and are running right now.
+
+    Discovered rather than listed: which units depend on the router is a
+    property of the image on the device, not of this package, and hardcoding
+    one image's unit names here would be wrong for every other integrator.
+
+    Every failure mode -- no systemctl, a timeout, an unparsable answer --
+    degrades to an empty list. Restoring nothing is exactly the behaviour
+    this guard had before; being unable to enumerate dependents is not a
+    reason to refuse to flash.
+    """
+    try:
+        listed = run(
+            ["systemctl", "list-dependencies", "--reverse", "--plain", "--no-pager", unit],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        log.warning("could not list what depends on %s: %s", unit, exc)
+        return []
+    if getattr(listed, "returncode", 1) != 0:
+        return []
+
+    candidates = []
+    for line in (getattr(listed, "stdout", "") or "").splitlines():
+        name = line.strip().lstrip("\u25cf\u25cb\u2500\u2502\u251c\u2514 ").strip()
+        # Targets are deliberately skipped: a propagated stop does not take
+        # them down, and starting one would pull in far more than this guard
+        # ever touched.
+        if not name.endswith(".service"):
+            continue
+        if name in (unit, unit + ".service") or name in candidates:
+            continue
+        candidates.append(name)
+    if not candidates:
+        return []
+
+    try:
+        states = run(
+            ["systemctl", "is-active", *candidates],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        log.warning("could not check which dependents of %s are running: %s", unit, exc)
+        return []
+    # `is-active` exits non-zero when *any* argument is inactive, so its
+    # return code says nothing useful here; the per-unit answers do.
+    reported = (getattr(states, "stdout", "") or "").split()
+    return [name for name, state in zip(candidates, reported) if state == "active"]
+
+
 @contextlib.contextmanager
 def router_stopped(run=subprocess.run, unit: str = ROUTER_UNIT):
     """Stop arduino-router for the duration of a flash, then restore it.
@@ -223,10 +278,22 @@ def router_stopped(run=subprocess.run, unit: str = ROUTER_UNIT):
     exactly the crash-loop failure this project has hit before.
     """
     stopped = False
+    restore = []
     try:
+        # Recorded before the stop, because after it they are already down.
+        restore = _running_dependents(run, unit)
         try:
             result = run(
-                ["systemctl", "stop", unit], capture_output=True, text=True, timeout=30
+                # `stop` alone is not enough on a stock image: a sibling unit
+                # that Requires= this one and is Restart=always turns our stop
+                # into "Job for ... canceled" -- systemd honouring the newer
+                # start job. An irreversible stop job may not be cancelled that
+                # way, which is the whole point of the guard: GPIO 38 (SWD
+                # reset) must stay still for the duration of an erase.
+                ["systemctl", "stop", "--job-mode=replace-irreversibly", unit],
+                capture_output=True,
+                text=True,
+                timeout=30,
             )
         except (OSError, subprocess.TimeoutExpired) as exc:
             log.warning(
@@ -235,13 +302,38 @@ def router_stopped(run=subprocess.run, unit: str = ROUTER_UNIT):
         else:
             stopped = getattr(result, "returncode", 1) == 0
             if not stopped:
-                log.warning("could not stop %s; flashing anyway", unit)
+                # systemctl's own line is the whole diagnosis -- an
+                # authorisation refusal, an unknown unit and a unit that
+                # refuses to stop all arrive here as the same return code,
+                # and the operator reading this log has nothing else to go
+                # on. Both streams are captured above; either may carry it.
+                detail = " ".join(
+                    part.strip()
+                    for part in (
+                        getattr(result, "stderr", "") or "",
+                        getattr(result, "stdout", "") or "",
+                    )
+                    if part and part.strip()
+                )
+                log.warning(
+                    "could not stop %s; flashing anyway%s",
+                    unit,
+                    f": {detail}" if detail else "",
+                )
         yield stopped
     finally:
         if stopped:
             try:
+                # Everything the stop propagated to comes back with it. Those
+                # units were stopped by systemd, not by their own exit, so
+                # `Restart=` does not bring them back and the board would be
+                # left without whatever they provide -- host communication,
+                # in the case this was written for.
                 run(
-                    ["systemctl", "start", unit], capture_output=True, text=True, timeout=30
+                    ["systemctl", "start", unit, *restore],
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
                 )
             except (OSError, subprocess.TimeoutExpired) as exc:
                 log.warning("could not restart %s after flashing: %s", unit, exc)
