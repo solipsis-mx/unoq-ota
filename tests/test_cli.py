@@ -185,6 +185,10 @@ def _run_args(tmp_path, **overrides):
         poll_interval=0.0,
         jitter=0.0,
         once=True,
+        report_url=None,
+        device_id=None,
+        host_dir=None,
+        host_unit=None,
     )
     defaults.update(overrides)
     return argparse.Namespace(**defaults)
@@ -314,6 +318,22 @@ def test_main_run_help_exits_cleanly():
     assert exc_info.value.code == 0
 
 
+def test_reconcile_builds_an_identity_agnostic_health_check(monkeypatch, tmp_path):
+    captured = {}
+
+    def fake_reconcile(state_dir, health, target):
+        captured["expected_version"] = health.expected_version
+        from unoq_ota.reconciler import ReconcileResult
+
+        return ReconcileResult(healthy=True, action="none")
+
+    monkeypatch.setattr(cli, "reconcile", fake_reconcile)
+    monkeypatch.setattr(cli, "resolve_flash_target", _fake_target)
+
+    assert cli.main(["--state-dir", str(tmp_path), "reconcile"]) == 0
+    assert captured["expected_version"] is None
+
+
 def test_main_run_without_required_args_exits_nonzero_naming_them(capsys):
     with pytest.raises(SystemExit) as exc_info:
         cli.main(["run"])
@@ -322,3 +342,76 @@ def test_main_run_without_required_args_exits_nonzero_naming_them(capsys):
     stderr = capsys.readouterr().err
     assert "--source" in stderr
     assert "--keys-dir" in stderr
+
+
+def test_status_json_reads_state_and_the_journal(tmp_path, capsys):
+    from unoq_ota.events import EventLog, JOURNAL_NAME
+    from unoq_ota.state import Phase, State
+
+    store = StateStore(tmp_path / "state.json")
+    store.save(
+        State(
+            phase=Phase.COMMITTED,
+            version="bench-wifi-1",
+            committed_version="bench-wifi-1",
+            sequence=1,
+        )
+    )
+    EventLog(tmp_path / JOURNAL_NAME, device_id="unoq2").record(
+        kind="update", version="bench-wifi-1", status="committed", detail="healthy"
+    )
+
+    assert cli.main(["--state-dir", str(tmp_path), "--device-id", "unoq2", "status", "--json"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["device"] == "unoq2"
+    assert payload["phase"] == "committed"
+    assert payload["committed_version"] == "bench-wifi-1"
+    assert payload["last_event"]["status"] == "committed"
+
+
+def test_reconcile_records_an_event_in_the_journal(monkeypatch, tmp_path):
+    from unoq_ota.events import JOURNAL_NAME
+    from unoq_ota.reconciler import ReconcileResult
+
+    def fake_reconcile(state_dir, health, target):
+        return ReconcileResult(healthy=True, action="reflashed", image="current.bin")
+
+    monkeypatch.setattr(cli, "reconcile", fake_reconcile)
+    monkeypatch.setattr(cli, "resolve_flash_target", _fake_target)
+
+    assert cli.main(["--state-dir", str(tmp_path), "--device-id", "unoq2", "reconcile"]) == 0
+    lines = (tmp_path / JOURNAL_NAME).read_text().splitlines()
+    row = json.loads(lines[-1])
+    assert row["kind"] == "reconcile"
+    assert row["action"] == "reflashed"
+    assert row["image"] == "current.bin"
+    assert row["healthy"] is True
+
+
+def test_run_wraps_the_source_so_reports_land_in_the_journal(monkeypatch, tmp_path):
+    from unoq_ota.events import JOURNAL_NAME
+    from unoq_ota.interfaces import Status, Update
+    from unoq_ota.sources.local import LocalFileSource
+
+    source_dir = tmp_path / "src"
+    source_dir.mkdir()
+    (source_dir / "manifest.json").write_text(json.dumps(_manifest()))
+    captured: dict = {}
+    monkeypatch.setattr(cli, "resolve_flash_target", _fake_target)
+    _patch_agent(monkeypatch, captured)
+
+    args = _run_args(
+        tmp_path,
+        source_dir=source_dir,
+        device_id="unoq2",
+        report_url=None,
+    )
+    assert cli._run(args, argparse.ArgumentParser()) == 0
+
+    source = captured["source"]
+    assert not isinstance(source, LocalFileSource)
+    update = Update(version="1.0.0", sequence=1, manifest={}, raw_manifest=b"{}")
+    source.report(update, Status.COMMITTED, "healthy")
+    row = json.loads((tmp_path / "state" / JOURNAL_NAME).read_text().splitlines()[-1])
+    assert row["status"] == "committed"
+    assert row["device"] == "unoq2"

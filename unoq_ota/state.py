@@ -41,6 +41,8 @@ class State:
     poisoned: list = field(default_factory=list)
     sequence: int = 0
     core_version: str | None = None
+    committed_version: str | None = None
+    previous_version: str | None = None
 
 
 def _sanitize_attempts(value: object) -> dict:
@@ -124,6 +126,8 @@ class StateStore:
             poisoned=_sanitize_poisoned(raw.get("poisoned")),
             sequence=_sanitize_sequence(raw.get("sequence")),
             core_version=_sanitize_optional_str(raw.get("core_version")),
+            committed_version=_sanitize_optional_str(raw.get("committed_version")),
+            previous_version=_sanitize_optional_str(raw.get("previous_version")),
         )
 
     def save(self, state: State) -> None:

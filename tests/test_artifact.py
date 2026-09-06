@@ -83,3 +83,10 @@ def test_rejects_a_file_too_short_to_hold_a_header(tmp_path):
 
     with pytest.raises(ArtifactError, match="too small"):
         load_artifact(path)
+
+
+def test_missing_file_raises_artifact_error_not_file_not_found(tmp_path):
+    missing = tmp_path / "no-such.bin"
+    with pytest.raises(ArtifactError, match="could not read") as excinfo:
+        load_artifact(missing)
+    assert isinstance(excinfo.value.__cause__, FileNotFoundError)

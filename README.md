@@ -4,8 +4,9 @@ Over-the-air firmware updates for the Arduino UNO Q's STM32, driven from the
 board's own Linux side. No programmer, no USB cable, nobody standing next to
 the board.
 
-> **Status: design complete, implementation in progress.** Nothing here is
-> ready to point at a device you can't reach. See [DESIGN.md](DESIGN.md).
+> Sketch OTA, boot recovery, and optional host-file payloads are implemented.
+> AWS IoT Jobs is designed as an `UpdateSource` extra and is **not shipped**.
+> See [DESIGN.md](DESIGN.md).
 
 ## Why this works
 
@@ -20,12 +21,16 @@ do it while the board sits somewhere inconvenient. That's this project.
 
 ## What it does
 
-- Fetches signed firmware from wherever you keep it — a static URL, S3, GitHub
-  Releases, AWS IoT Jobs, or a local directory.
+- Fetches a signed manifest over HTTP (or from a local directory). The same
+  pull works on Wi-Fi or any other Linux IP bearer.
 - Verifies signature, digest, board compatibility, and the sketch header
   **before** the MCU is touched at all.
 - Flashes only the sketch partition, locally over SWD — the network is never in
   the loop during the write.
+- Optionally unpacks a signed `host_payload` tarball into a directory you
+  choose (`--host-dir`) and restarts a systemd unit you name (`--host-unit`).
+  MCU and host are one transaction: if either side fails health, both roll back.
+  Omit `host_payload` and the update is MCU-only.
 - Checks that the new firmware actually came up, and **rolls back if it
   didn't**.
 - Recovers a device whose flash was interrupted by power loss, on the next
@@ -45,18 +50,16 @@ to report a version and a heartbeat counter. There is deliberately no
 "did any bytes move?" fallback — that check passes firmware that is completely
 dead, which makes rollback unreachable.
 
-**Battery or vehicle installs need a `Gate`.** The dangerous window is the
-erase, and the risk is usually a brownout rather than a clean power loss.
-Write a gate that flashes only when supply is stable and likely to stay that
-way. Ships with `AlwaysGate`, which is the right default for a device on a
-bench and the wrong one for a device on an engine.
+**Unstable power needs a `Gate`.** The dangerous window is the erase. Ships
+with `AlwaysGate` (bench). Implement `Gate` in your own code if the device
+can lose supply mid-write.
 
 ## Not in scope
 
-Updating the Zephyr core image, Linux, or the agent itself. The MCU is
-recoverable from Linux; Linux is recoverable from nowhere. Note the
-consequence: changes needing a Zephyr Kconfig or devicetree rebuild — power
-management modes, new drivers — can't be delivered this way.
+Updating the Zephyr core image, the Linux rootfs, or the agent itself. A
+`host_payload` may replace files in one directory you control; it is not a
+rootfs updater. Changes that need a Zephyr Kconfig or devicetree rebuild
+cannot be delivered this way.
 
 ## Layout
 
@@ -67,7 +70,8 @@ unoq_ota/
   flasher.py      OpenOCD invocation, offset resolution, header validation
   verify.py       signature, digest, sequence
   state.py        crash-safe persistence
-  sources/        local, http_manifest, aws_iot_jobs
+  host.py         optional host-tree swap + rollback
+  sources/        local, http_manifest
   gates/          always  (write your own)
   health/         version_report
 tools/            keygen, sign-artifact

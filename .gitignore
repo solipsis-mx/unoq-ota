@@ -8,7 +8,9 @@ build/
 .pytest_cache/
 .coverage
 
-# Never commit signing material or device state.
+# Local hardware-bench artifacts and signing keys. Never commit.
+.bench/
+.claude.local.md
 *.pem
 *.key
 *_private*

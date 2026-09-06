@@ -20,6 +20,9 @@ class FakeHealth:
         self.calls += 1
         return self.results.pop(0) if self.results else False
 
+    def wait_alive(self, timeout_s: float) -> str | None:
+        return "alive" if self.wait_healthy(timeout_s) else None
+
 
 def _seed(state_dir: Path, *names):
     state_dir.mkdir(parents=True, exist_ok=True)
@@ -134,6 +137,9 @@ class RaisingHealth:
         if isinstance(outcome, BaseException):
             raise outcome
         return outcome
+
+    def wait_alive(self, timeout_s: float) -> str | None:
+        return "alive" if self.wait_healthy(timeout_s) else None
 
 
 def test_initial_health_check_raising_still_proceeds_to_recovery(tmp_path):

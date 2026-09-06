@@ -108,3 +108,54 @@ def test_collect_returns_no_reports_when_the_command_is_silent():
     check = VersionReportHealthCheck("test-1.0.0", monitor_cmd=["true"])
     assert check._collect(5) == []
     assert check.wait_healthy(5) is False
+
+
+def test_wait_alive_returns_the_version_that_progressed():
+    check = _Check("ignored", ["OTA-HEALTH 1.4.0 seq=1", "OTA-HEALTH 1.4.0 seq=2"])
+    assert check.wait_alive(5) == "1.4.0"
+
+
+def test_wait_alive_returns_none_on_silence():
+    assert _Check("ignored", []).wait_alive(5) is None
+
+
+def test_wait_alive_returns_none_when_seq_does_not_advance():
+    check = _Check("ignored", ["OTA-HEALTH 1.4.0 seq=7", "OTA-HEALTH 1.4.0 seq=7"])
+    assert check.wait_alive(5) is None
+
+
+def test_wait_alive_does_not_require_a_particular_identity():
+    # The reconciler must accept whatever firmware is running, including
+    # after an IDE upload the agent never heard of. Pinning expected_version
+    # to "" made every real report look dead.
+    check = VersionReportHealthCheck(expected_version=None)
+    check._collect = lambda timeout_s: ["OTA-HEALTH ide-build seq=3", "OTA-HEALTH ide-build seq=4"]
+    assert check.wait_alive(5) == "ide-build"
+    assert check.wait_healthy(5) is False
+
+
+def test_tcp_monitor_reads_health_lines_from_a_local_socket():
+    import socket
+    import threading
+    import time
+
+    server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    server.bind(("127.0.0.1", 0))
+    server.listen(1)
+    port = server.getsockname()[1]
+
+    def serve():
+        conn, _ = server.accept()
+        try:
+            conn.sendall(b"OTA-HEALTH bench-wifi-1 seq=1\nOTA-HEALTH bench-wifi-1 seq=2\n")
+            time.sleep(0.2)
+        finally:
+            conn.close()
+            server.close()
+
+    threading.Thread(target=serve, daemon=True).start()
+    check = VersionReportHealthCheck(
+        "bench-wifi-1", monitor_addr=("127.0.0.1", port)
+    )
+    assert check.wait_healthy(2) is True

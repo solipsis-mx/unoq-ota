@@ -1,13 +1,24 @@
 [Unit]
 Description=unoq-ota boot-time MCU recovery
 DefaultDependencies=no
-After=local-fs.target
+After=local-fs.target arduino-router.service
 Before=unoq-ota.service
 
 [Service]
 Type=oneshot
+# EnvironmentFile is optional: a missing file is ignored (`-`). Set
+# UNOQ_OTA_REPORT_URL so a boot recovery is visible to the publisher,
+# not only in journalctl.
+EnvironmentFile=-/etc/unoq-ota/agent.env
+# User=root makes Path.home() /root. The Zephyr core lives in the
+# interactive account's ~/.arduino15; without this, reconcile crashes
+# before it can even look at the MCU.
+Environment=HOME=/home/arduino
 ExecStart=/usr/local/bin/unoq-ota reconcile
 RemainAfterExit=yes
+SyslogIdentifier=unoq-ota-reconcile
+StandardOutput=journal
+StandardError=journal
 # Runs as root so it can stop arduino-router without sudo. That unit toggles
 # GPIO 38 -- the SWD reset line -- in its ExecStopPost and is Restart=always,
 # so a restart landing mid-erase would assert reset on the target.

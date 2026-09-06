@@ -23,6 +23,14 @@ from unoq_ota.verify import VerificationError, canonical_bytes
 TARGET = FlashTarget(address=0x08100000, max_size=786432, core_version="1.0.0")
 
 
+@pytest.fixture(autouse=True)
+def _no_swd_in_agent_tests(monkeypatch):
+    """detect_drift's default read_header talks to OpenOCD. Unit tests must not."""
+    import unoq_ota.preflight as preflight_module
+
+    monkeypatch.setattr(preflight_module, "detect_drift", lambda *args, **kwargs: False)
+
+
 @contextlib.contextmanager
 def _fake_router_stopped():
     """A no-op stand-in for `unoq_ota.flasher.router_stopped`.
@@ -59,28 +67,53 @@ class StubHealth:
     def __init__(self, results):
         self.results = list(results)
 
-    def wait_healthy(self, timeout_s):
+    def _next(self):
         return self.results.pop(0) if self.results else False
+
+    def wait_healthy(self, timeout_s):
+        item = self._next()
+        if isinstance(item, str):
+            return True
+        return bool(item)
+
+    def wait_alive(self, timeout_s):
+        item = self._next()
+        if isinstance(item, str):
+            return item
+        if item is True:
+            return "alive"
+        return None
 
 
 class ScriptedHealth:
     """A HealthCheck backed by a script shared across every factory call.
 
-    Used where a test needs to control the outcome of several successive
-    `wait_healthy()` calls -- possibly made through separate `health_factory`
-    invocations -- some of which may need to raise. The script list is
-    shared by reference (never copied), so multiple `ScriptedHealth`
-    instances wrapping the same list consume it in order.
+    Script entries are bools, version strings, or exceptions. bools feed
+    `wait_healthy`; strings feed `wait_alive`; exceptions are raised.
     """
 
     def __init__(self, script):
         self.script = script
 
-    def wait_healthy(self, timeout_s):
+    def _take(self):
         item = self.script.pop(0)
         if isinstance(item, BaseException):
             raise item
         return item
+
+    def wait_healthy(self, timeout_s):
+        item = self._take()
+        if isinstance(item, str):
+            return True
+        return bool(item)
+
+    def wait_alive(self, timeout_s):
+        item = self._take()
+        if isinstance(item, str):
+            return item
+        if item is True:
+            return "alive"
+        return None
 
 
 class RecordingHealthFactory:
@@ -111,7 +144,9 @@ def _update(version="1.0.0", sequence=1):
     return Update(version=version, sequence=sequence, manifest=manifest, raw_manifest=b"{}")
 
 
-def _agent(tmp_path, source, gate, health, flashed=None, verify_ok=True, health_factory=None):
+def _agent(
+    tmp_path, source, gate, health, flashed=None, verify_ok=True, health_factory=None, verify_error=None
+):
     def fetch(url, dest):
         Path(dest).write_bytes(make_artifact_bytes())
         return Path(dest)
@@ -121,6 +156,8 @@ def _agent(tmp_path, source, gate, health, flashed=None, verify_ok=True, health_
             flashed.append(artifact.path.name)
 
     def verify(manifest, path, last_sequence):
+        if verify_error is not None:
+            raise verify_error
         if not verify_ok:
             raise VerificationError("bad signature")
 
@@ -162,38 +199,80 @@ def test_waits_when_the_gate_refuses(tmp_path):
     assert (tmp_path / "staged.bin").is_file()
 
 
-def test_rejects_and_poisons_an_unverifiable_update(tmp_path):
+def test_rejects_an_unverifiable_update_without_poisoning_unsigned_input(tmp_path):
     agent = _agent(
         tmp_path, StubSource(_update()), StubGate(), StubHealth([]), verify_ok=False
     )
 
-    assert agent.run_once() == Phase.REJECTED
-    assert StateStore(tmp_path / "state.json").is_poisoned("1.0.0")
+    assert agent.run_once() == Phase.IDLE
+    assert not StateStore(tmp_path / "state.json").is_poisoned("1.0.0")
 
 
 def test_rolls_back_when_the_new_firmware_is_unhealthy(tmp_path):
     (tmp_path).mkdir(parents=True, exist_ok=True)
     (tmp_path / "current.bin").write_bytes(make_artifact_bytes())
     flashed = []
-    # First `False`: the new firmware's post-flash check -- unhealthy,
-    # triggers rollback. Second `False`: the post-rollback check against
-    # `current.bin` -- uninformative (the restored image is not
-    # `update.version`), which is exactly the case this loop must accept as
-    # "restored" rather than loop forever waiting for a `True` that a
-    # correctly-restored image would never produce.
+    # Post-flash: new firmware unhealthy. Rollback of current.bin: that
+    # image comes up as a *different* live version, which is success.
     agent = _agent(
-        tmp_path, StubSource(_update()), StubGate(), StubHealth([False, False]), flashed
+        tmp_path, StubSource(_update()), StubGate(), StubHealth([False, "0.9.0"]), flashed
     )
 
     assert agent.run_once() == Phase.ROLLED_BACK
     assert flashed == ["staged.bin", "current.bin"]
 
 
+def test_rollback_does_not_treat_a_silent_mcu_as_restored(tmp_path):
+    (tmp_path).mkdir(parents=True, exist_ok=True)
+    (tmp_path / "current.bin").write_bytes(make_artifact_bytes())
+    (tmp_path / "golden.bin").write_bytes(make_artifact_bytes())
+    flashed = []
+    # current.bin flashes but the MCU stays silent; golden.bin then reports.
+    agent = _agent(
+        tmp_path,
+        StubSource(_update()),
+        StubGate(),
+        StubHealth([False, None, "golden-1"]),
+        flashed,
+    )
+
+    assert agent.run_once() == Phase.ROLLED_BACK
+    assert flashed == ["staged.bin", "current.bin", "golden.bin"]
+
+
+def test_rollback_requires_the_committed_version_when_it_is_known(tmp_path):
+    (tmp_path).mkdir(parents=True, exist_ok=True)
+    (tmp_path / "current.bin").write_bytes(make_artifact_bytes())
+    (tmp_path / "golden.bin").write_bytes(make_artifact_bytes())
+    store = StateStore(tmp_path / "state.json")
+    state = store.load()
+    state.committed_version = "0.9.0"
+    store.save(state)
+    flashed = []
+    agent = _agent(
+        tmp_path,
+        StubSource(_update(version="2.0.0")),
+        StubGate(),
+        StubHealth([False, "other-live", "golden-1"]),
+        flashed,
+    )
+
+    assert agent.run_once() == Phase.ROLLED_BACK
+    assert flashed == ["staged.bin", "current.bin", "golden.bin"]
+
+
+def test_commit_records_the_version_stored_in_current_bin(tmp_path):
+    agent = _agent(tmp_path, StubSource(_update(version="3.1.0")), StubGate(), StubHealth([True]))
+
+    assert agent.run_once() == Phase.COMMITTED
+    assert StateStore(tmp_path / "state.json").load().committed_version == "3.1.0"
+
+
 def test_poisons_a_version_that_failed_its_health_check(tmp_path):
     (tmp_path).mkdir(parents=True, exist_ok=True)
     (tmp_path / "current.bin").write_bytes(make_artifact_bytes())
     agent = _agent(
-        tmp_path, StubSource(_update()), StubGate(), StubHealth([False, False])
+        tmp_path, StubSource(_update()), StubGate(), StubHealth([False, "0.9.0"])
     )
     agent.run_once()
 
@@ -309,11 +388,12 @@ def test_rollback_skips_a_candidate_that_raises_an_unexpected_error(tmp_path):
             raise OSError("disk gremlin")
         return load_artifact(path)
 
+    shared_health = StubHealth([False, "0.9.0"])
     agent = Agent(
         state_dir=tmp_path,
         source=StubSource(_update()),
         gate=StubGate(),
-        health_factory=lambda version: StubHealth([False]),
+        health_factory=lambda version: shared_health,
         target=TARGET,
         flash=flash,
         load=load,
@@ -336,6 +416,12 @@ def test_default_verify_binds_public_keys_and_the_staged_path(tmp_path):
         "version": "2.0.0",
         "sequence": 5,
         "artifact": {"url": "http://x/a.bin", "size": len(artifact_bytes), "sha256": digest},
+        "target": {
+            "board": "arduino_uno_q",
+            "link_mode": "dynamic",
+            "sketch_offset": "0x08100000",
+            "partition_size": 786432,
+        },
     }
     sig = key.sign(canonical_bytes(manifest))
     manifest["signature"] = {
@@ -376,6 +462,12 @@ def test_default_verify_rejects_a_tampered_artifact(tmp_path):
         "version": "2.0.0",
         "sequence": 5,
         "artifact": {"url": "http://x/a.bin", "size": len(artifact_bytes), "sha256": digest},
+        "target": {
+            "board": "arduino_uno_q",
+            "link_mode": "dynamic",
+            "sketch_offset": "0x08100000",
+            "partition_size": 786432,
+        },
     }
     sig = key.sign(canonical_bytes(manifest))
     manifest["signature"] = {
@@ -420,11 +512,10 @@ def test_rollback_falls_through_to_golden_bin_when_current_bin_still_reports_bad
     (tmp_path / "golden.bin").write_bytes(make_artifact_bytes())
     flashed = []
     # post-flash check: False (unhealthy, triggers rollback)
-    # current.bin check: True (still reports the bad version -- flash did
-    #   not take, fall through)
-    # golden.bin check: False (uninformative, accepted)
+    # current.bin: still reports the bad version -- flash did not take
+    # golden.bin: a different live version -- restored
     agent = _agent(
-        tmp_path, StubSource(_update()), StubGate(), StubHealth([False, True, False]), flashed
+        tmp_path, StubSource(_update()), StubGate(), StubHealth([False, "1.0.0", "golden-1"]), flashed
     )
 
     assert agent.run_once() == Phase.ROLLED_BACK
@@ -450,8 +541,9 @@ def test_rollback_returns_a_result_rather_than_raising_when_a_health_check_raise
     """
     (tmp_path).mkdir(parents=True, exist_ok=True)
     (tmp_path / "current.bin").write_bytes(make_artifact_bytes())
+    (tmp_path / "previous.bin").write_bytes(make_artifact_bytes())
     flashed = []
-    script = [False, RuntimeError("health backend crashed")]
+    script = [False, RuntimeError("health backend crashed"), "0.9.0"]
     agent = _agent(
         tmp_path,
         StubSource(_update()),
@@ -464,7 +556,7 @@ def test_rollback_returns_a_result_rather_than_raising_when_a_health_check_raise
     result = agent.run_once()  # must not raise
 
     assert result == Phase.ROLLED_BACK
-    assert flashed == ["staged.bin", "current.bin"]
+    assert flashed == ["staged.bin", "current.bin", "previous.bin"]
 
 
 def test_run_once_does_not_propagate_when_wait_healthy_raises_after_the_flash(tmp_path):
@@ -476,7 +568,7 @@ def test_run_once_does_not_propagate_when_wait_healthy_raises_after_the_flash(tm
     (tmp_path).mkdir(parents=True, exist_ok=True)
     (tmp_path / "current.bin").write_bytes(make_artifact_bytes())
     flashed = []
-    script = [RuntimeError("health backend crashed"), False]
+    script = [RuntimeError("health backend crashed"), "0.9.0"]
     agent = _agent(
         tmp_path,
         StubSource(_update()),
@@ -522,13 +614,13 @@ def test_a_poisoned_version_is_rejected_without_downloading(tmp_path):
     assert any(status == Status.REJECTED for status, _ in source.reports)
 
 
-def test_a_verify_failure_records_an_attempt_as_well_as_poisoning(tmp_path):
-    """I2: without record_attempt here, attempts_for stayed at zero forever,
-    so a signature-invalid or replayed manifest produced a full download,
-    verify, and reject on every cycle rather than ever engaging the cap.
-    """
+def test_a_signed_verify_failure_records_an_attempt_as_well_as_poisoning(tmp_path):
     agent = _agent(
-        tmp_path, StubSource(_update()), StubGate(), StubHealth([]), verify_ok=False
+        tmp_path,
+        StubSource(_update()),
+        StubGate(),
+        StubHealth([]),
+        verify_error=VerificationError("sha256 mismatch", poisonable=True),
     )
 
     assert agent.run_once() == Phase.REJECTED
@@ -597,13 +689,39 @@ def test_rollback_proceeds_when_poison_raises(tmp_path, monkeypatch):
     monkeypatch.setattr(StateStore, "poison", raising_poison)
 
     agent = _agent(
-        tmp_path, StubSource(_update()), StubGate(), StubHealth([False, False]), flashed
+        tmp_path, StubSource(_update()), StubGate(), StubHealth([False, "0.9.0"]), flashed
     )
 
     result = agent.run_once()  # must not raise
 
     assert result == Phase.ROLLED_BACK
     assert flashed == ["staged.bin", "current.bin"]
+
+
+def test_commit_survives_a_failed_state_save(tmp_path, monkeypatch):
+    real_save = StateStore.save
+
+    def flaky_save(self, state):
+        if state.phase == Phase.COMMITTED:
+            raise OSError("disk full (simulated)")
+        return real_save(self, state)
+
+    monkeypatch.setattr(StateStore, "save", flaky_save)
+    agent = _agent(tmp_path, StubSource(_update()), StubGate(), StubHealth([True]))
+
+    assert agent.run_once() == Phase.COMMITTED
+
+
+def test_flash_proceeds_when_record_attempt_raises(tmp_path, monkeypatch):
+    def boom(self, version):
+        raise OSError("disk full (simulated)")
+
+    monkeypatch.setattr(StateStore, "record_attempt", boom)
+    flashed = []
+    agent = _agent(tmp_path, StubSource(_update()), StubGate(), StubHealth([True]), flashed)
+
+    assert agent.run_once() == Phase.COMMITTED
+    assert flashed == ["staged.bin"]
 
 
 def test_constructing_an_agent_without_fetch_raises(tmp_path):
@@ -625,6 +743,48 @@ def test_constructing_an_agent_without_fetch_raises(tmp_path):
 # ---------------------------------------------------------------------------
 # Task 11: preflight guards wired into run_once (clock, disk, router)
 # ---------------------------------------------------------------------------
+
+
+def test_drift_discards_stale_current_bin_so_rollback_does_not_flash_fiction(
+    tmp_path, monkeypatch
+):
+    import unoq_ota.preflight as preflight_module
+
+    monkeypatch.setattr(preflight_module, "detect_drift", lambda *args, **kwargs: True)
+
+    (tmp_path / "current.bin").write_bytes(make_artifact_bytes())
+    (tmp_path / "golden.bin").write_bytes(make_artifact_bytes())
+    flashed = []
+    agent = _agent(
+        tmp_path,
+        StubSource(_update()),
+        StubGate(),
+        StubHealth([False, "golden-1"]),
+        flashed,
+    )
+
+    assert agent.run_once() == Phase.ROLLED_BACK
+    assert flashed == ["staged.bin", "golden.bin"]
+    assert not (tmp_path / "current.bin").exists()
+
+
+def test_matching_resident_image_is_kept_as_rollback_target(tmp_path, monkeypatch):
+    import unoq_ota.preflight as preflight_module
+
+    monkeypatch.setattr(preflight_module, "detect_drift", lambda *args, **kwargs: False)
+
+    (tmp_path / "current.bin").write_bytes(make_artifact_bytes())
+    flashed = []
+    agent = _agent(
+        tmp_path,
+        StubSource(_update()),
+        StubGate(),
+        StubHealth([False, "0.9.0"]),
+        flashed,
+    )
+
+    assert agent.run_once() == Phase.ROLLED_BACK
+    assert flashed == ["staged.bin", "current.bin"]
 
 
 def test_clock_guard_defers_without_counting_an_attempt_or_poisoning(tmp_path, monkeypatch):
@@ -693,7 +853,7 @@ def test_preflight_guard_leaves_state_consistent_with_its_return_value(tmp_path,
     assert store.load().phase == Phase.IDLE
 
 
-def test_missing_artifact_size_poisons_and_rejects_without_flashing(tmp_path):
+def test_missing_artifact_size_does_not_poison_unsigned_manifest_fields(tmp_path):
     manifest = {
         "version": "1.0.0",
         "sequence": 1,
@@ -701,11 +861,11 @@ def test_missing_artifact_size_poisons_and_rejects_without_flashing(tmp_path):
     }
     update = Update(version="1.0.0", sequence=1, manifest=manifest, raw_manifest=b"{}")
     flashed = []
-    agent = _agent(tmp_path, StubSource(update), StubGate(), StubHealth([]), flashed)
+    agent = _agent(tmp_path, StubSource(update), StubGate(), StubHealth([True]), flashed)
 
-    assert agent.run_once() == Phase.REJECTED
-    assert flashed == []
-    assert StateStore(tmp_path / "state.json").is_poisoned("1.0.0")
+    assert agent.run_once() == Phase.COMMITTED
+    assert flashed == ["staged.bin"]
+    assert not StateStore(tmp_path / "state.json").is_poisoned("1.0.0")
 
 
 def test_device_side_error_from_clock_check_is_not_misattributed_to_the_manifest(
@@ -838,3 +998,85 @@ def test_router_is_restarted_even_when_the_flash_raises(tmp_path):
 
     assert agent.run_once() == Phase.IDLE
     assert calls == ["enter", "exit"]
+
+
+def _host_bytes():
+    return b"host-payload-bytes"
+
+
+def _coupled_update():
+    update = _update(version="2.0.0", sequence=2)
+    digest = hashlib.sha256(_host_bytes()).hexdigest()
+    update.manifest["host_payload"] = {
+        "url": "http://x/host.tar.gz",
+        "size": len(_host_bytes()),
+        "sha256": digest,
+    }
+    return update
+
+
+def test_omitting_host_payload_does_not_touch_the_host_tree(tmp_path):
+    applied = []
+    agent = _agent(tmp_path, StubSource(_update()), StubGate(), StubHealth([True]))
+    agent._apply_host = lambda archive, live: applied.append(live)
+    assert agent.run_once() == Phase.COMMITTED
+    assert applied == []
+
+
+def test_applies_host_payload_after_the_mcu_is_healthy(tmp_path):
+    applied = []
+    restarted = []
+
+    def fetch(url, dest):
+        Path(dest).parent.mkdir(parents=True, exist_ok=True)
+        Path(dest).write_bytes(_host_bytes() if "host" in url else make_artifact_bytes())
+
+    def apply_host(archive, live):
+        applied.append((Path(archive).name, Path(live).name))
+
+    agent = Agent(
+        state_dir=tmp_path,
+        source=StubSource(_coupled_update()),
+        gate=StubGate(),
+        health_factory=lambda version: StubHealth([True]),
+        target=TARGET,
+        flash=lambda artifact, target: None,
+        fetch=fetch,
+        verify=lambda manifest, path, last_sequence: None,
+        router_stopped=_fake_router_stopped,
+        apply_host=apply_host,
+        host_restart=lambda: restarted.append("restart"),
+        host_health=lambda: True,
+    )
+    assert agent.run_once() == Phase.COMMITTED
+    assert applied == [("staged-host.tar.gz", "host")]
+    assert restarted == ["restart"]
+    assert (tmp_path / "staged-host.tar.gz").is_file()
+
+
+def test_host_health_failure_rolls_back_host_and_mcu(tmp_path):
+    (tmp_path / "current.bin").write_bytes(make_artifact_bytes())
+    rolled = []
+    flashed = []
+
+    def fetch(url, dest):
+        Path(dest).parent.mkdir(parents=True, exist_ok=True)
+        Path(dest).write_bytes(_host_bytes() if "host" in url else make_artifact_bytes())
+
+    agent = Agent(
+        state_dir=tmp_path,
+        source=StubSource(_coupled_update()),
+        gate=StubGate(),
+        health_factory=lambda version: StubHealth([True, "1.0.0"]),
+        target=TARGET,
+        flash=lambda artifact, target: flashed.append(artifact.path.name),
+        fetch=fetch,
+        verify=lambda manifest, path, last_sequence: None,
+        router_stopped=_fake_router_stopped,
+        apply_host=lambda archive, live: None,
+        rollback_host=lambda live: rolled.append(Path(live).name),
+        host_health=lambda: False,
+    )
+    assert agent.run_once() == Phase.ROLLED_BACK
+    assert rolled == ["host"]
+    assert flashed == ["staged.bin", "current.bin"]

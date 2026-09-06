@@ -13,9 +13,15 @@ Type=simple
 #   [Service]
 #   ExecStart=
 #   ExecStart=/usr/local/bin/unoq-ota run --source http --manifest-url https://example.invalid/manifest.json --keys-dir /etc/unoq-ota/keys
+# Optional: UNOQ_OTA_REPORT_URL and UNOQ_OTA_DEVICE_ID in
+# /etc/unoq-ota/agent.env so every status POST includes a stable identity.
+EnvironmentFile=-/etc/unoq-ota/agent.env
 ExecStart=/usr/local/bin/unoq-ota run
 Restart=always
 RestartSec=30
+SyslogIdentifier=unoq-ota
+StandardOutput=journal
+StandardError=journal
 User=root
 
 [Install]

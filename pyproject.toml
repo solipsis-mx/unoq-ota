@@ -16,5 +16,8 @@ unoq-ota = "unoq_ota.cli:main"
 requires = ["setuptools>=61"]
 build-backend = "setuptools.build_meta"
 
+[tool.setuptools.packages.find]
+include = ["unoq_ota*"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -5,8 +5,8 @@ from __future__ import annotations
 
 import argparse
 import base64
+import hashlib
 import json
-import sys
 from datetime import datetime
 from pathlib import Path
 
@@ -52,6 +52,7 @@ def main() -> int:
     parser.add_argument("--private-key", type=Path, required=True)
     parser.add_argument("--key-id", required=True)
     parser.add_argument("--sketch-offset", default="0x08100000")
+    parser.add_argument("--partition-size", type=int, default=786432)
     parser.add_argument(
         "--not-before",
         default=None,
@@ -64,7 +65,12 @@ def main() -> int:
         help="ISO-8601 timestamp with explicit UTC offset; manifest is invalid after "
         "this -- the emergency-revocation mechanism",
     )
-    parser.add_argument("--out", type=Path, default=Path("manifest.json"))
+    parser.add_argument("--host-payload", type=Path, default=None)
+    parser.add_argument(
+        "--host-url",
+        default=None,
+        help="URL devices will fetch the host payload from (required with --host-payload)",
+    )
     args = parser.parse_args()
 
     # Validate before signing: never sign an artifact that would be refused.
@@ -89,14 +95,25 @@ def main() -> int:
         "target": {
             "board": "arduino_uno_q",
             "link_mode": "dynamic",
-            # sketch_offset is descriptive only: nothing on the device side
-            # reads it back or checks it against the board's actual flash
-            # target (unoq_ota.board.resolve_flash_target() is the sole
-            # source of truth there), so there is nothing to validate this
-            # against at sign time beyond the CLI default.
             "sketch_offset": args.sketch_offset,
+            "partition_size": args.partition_size,
         },
     }
+
+    host_path = args.host_payload
+    host_url = args.host_url
+    if (host_path is None) != (host_url is None):
+        raise SystemExit("--host-payload and --host-url must be supplied together")
+    if host_path is not None:
+        try:
+            host_bytes = host_path.read_bytes()
+        except OSError as exc:
+            raise SystemExit(f"cannot read --host-payload {host_path}: {exc}")
+        manifest["host_payload"] = {
+            "url": host_url,
+            "size": len(host_bytes),
+            "sha256": hashlib.sha256(host_bytes).hexdigest(),
+        }
 
     if args.not_before is not None:
         manifest["not_before"] = _require_utc_qualified(args.not_before, "not-before")

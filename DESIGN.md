@@ -3,7 +3,9 @@
 Over-the-air firmware updates for the STM32U585 on an Arduino UNO Q, driven
 from the board's own Linux side.
 
-**Status:** design, pre-implementation.
+**Status:** sketch OTA, boot reconciler, and optional host payloads are
+implemented. AWS IoT Jobs remains an optional `UpdateSource` that is not
+shipped.
 
 ## The idea in one paragraph
 

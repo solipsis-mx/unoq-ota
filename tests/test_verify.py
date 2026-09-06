@@ -7,6 +7,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
+from unoq_ota.board import FlashTarget
 from unoq_ota.verify import (
     VerificationError,
     canonical_bytes,
@@ -462,3 +463,98 @@ def test_deliberate_verification_error_is_not_swallowed_or_reworded(keypair):
 
     with pytest.raises(VerificationError, match="refusing a possible replay"):
         verify_manifest(manifest, public_keys, last_sequence=5)
+
+
+UNOQ = FlashTarget(address=0x08100000, max_size=786432, core_version="1.0.0")
+
+
+def _target_block(board="arduino_uno_q", offset="0x08100000", size=786432):
+    return {"board": board, "link_mode": "dynamic", "sketch_offset": offset, "partition_size": size}
+
+
+def test_accepts_a_manifest_whose_target_matches_the_board(keypair):
+    key, public_keys = keypair
+    manifest = _signed({"sequence": 1, "target": _target_block()}, key)
+    verify_manifest(manifest, public_keys, last_sequence=0, target=UNOQ)
+
+
+def test_rejects_a_manifest_for_a_different_board(keypair):
+    key, public_keys = keypair
+    manifest = _signed({"sequence": 1, "target": _target_block(board="arduino_ventuno_q")}, key)
+    with pytest.raises(VerificationError, match="board") as excinfo:
+        verify_manifest(manifest, public_keys, last_sequence=0, target=UNOQ)
+    assert excinfo.value.poisonable is True
+
+
+def test_rejects_a_manifest_whose_flash_offset_does_not_match_the_board(keypair):
+    # The classic trap: arduino-flash.sh's 0x80F0000, a different board's sketch
+    # address. Same ELF magic as a UNO Q artifact, so header checks would pass.
+    key, public_keys = keypair
+    manifest = _signed({"sequence": 1, "target": _target_block(offset="0x080F0000")}, key)
+    with pytest.raises(VerificationError, match="sketch_offset") as excinfo:
+        verify_manifest(manifest, public_keys, last_sequence=0, target=UNOQ)
+    assert excinfo.value.poisonable is True
+
+
+def test_rejects_a_manifest_with_no_target_block_when_the_board_is_known(keypair):
+    key, public_keys = keypair
+    manifest = _signed({"sequence": 1}, key)
+    with pytest.raises(VerificationError, match="target") as excinfo:
+        verify_manifest(manifest, public_keys, last_sequence=0, target=UNOQ)
+    assert excinfo.value.poisonable is True
+
+
+def test_target_check_is_skipped_when_no_flash_target_is_supplied(keypair):
+    key, public_keys = keypair
+    manifest = _signed({"sequence": 1}, key)
+    verify_manifest(manifest, public_keys, last_sequence=0)
+
+
+def test_bad_signature_is_not_poisonable(keypair):
+    key, public_keys = keypair
+    manifest = _signed({"sequence": 1}, key)
+    manifest["version"] = "6.6.6"
+    with pytest.raises(VerificationError) as excinfo:
+        verify_manifest(manifest, public_keys, last_sequence=0)
+    assert excinfo.value.poisonable is False
+
+
+def test_verify_manifest_with_matching_host_payload_passes(keypair, tmp_path):
+    key, public_keys = keypair
+    host = tmp_path / "host.tar.gz"
+    host.write_bytes(b"host-bytes")
+    digest = hashlib.sha256(b"host-bytes").hexdigest()
+    manifest = _signed(
+        {
+            "sequence": 1,
+            "host_payload": {"url": "http://x/h.tar.gz", "size": 10, "sha256": digest},
+        },
+        key,
+    )
+    verify_manifest(manifest, public_keys, last_sequence=0, host_payload_path=host)
+
+
+def test_verify_manifest_rejects_a_host_payload_digest_mismatch(keypair, tmp_path):
+    key, public_keys = keypair
+    host = tmp_path / "host.tar.gz"
+    host.write_bytes(b"tampered")
+    digest = hashlib.sha256(b"host-bytes").hexdigest()
+    manifest = _signed(
+        {"sequence": 1, "host_payload": {"sha256": digest}},
+        key,
+    )
+    with pytest.raises(VerificationError, match="sha256") as excinfo:
+        verify_manifest(manifest, public_keys, last_sequence=0, host_payload_path=host)
+    assert excinfo.value.poisonable is True
+
+
+def test_verify_manifest_without_host_payload_path_does_not_check_host_bytes(keypair, tmp_path):
+    key, public_keys = keypair
+    host = tmp_path / "host.tar.gz"
+    host.write_bytes(b"tampered")
+    digest = hashlib.sha256(b"host-bytes").hexdigest()
+    manifest = _signed(
+        {"sequence": 1, "host_payload": {"sha256": digest}},
+        key,
+    )
+    verify_manifest(manifest, public_keys, last_sequence=0)

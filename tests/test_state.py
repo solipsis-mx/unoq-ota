@@ -17,12 +17,13 @@ def test_returns_a_default_state_when_no_file_exists(tmp_path):
 
 def test_round_trips_state(tmp_path):
     store = StateStore(tmp_path / "state.json")
-    store.save(State(phase=Phase.STAGED, version="1.2.3", sequence=7))
+    store.save(State(phase=Phase.STAGED, version="1.2.3", sequence=7, committed_version="1.0.0"))
 
     reloaded = store.load()
     assert reloaded.phase == Phase.STAGED
     assert reloaded.version == "1.2.3"
     assert reloaded.sequence == 7
+    assert reloaded.committed_version == "1.0.0"
 
 
 def test_recovers_from_a_corrupt_state_file(tmp_path):

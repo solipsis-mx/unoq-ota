@@ -49,6 +49,7 @@ from typing import Callable, ContextManager
 
 from unoq_ota.artifact import ArtifactError, load_artifact
 from unoq_ota.flasher import FlashError, router_stopped as _real_router_stopped, write_sketch
+from unoq_ota.host import HostError, apply_host_tree, rollback_host_tree
 from unoq_ota.interfaces import Status
 from unoq_ota.state import MAX_ATTEMPTS, Phase, StateStore
 from unoq_ota.verify import VerificationError
@@ -87,6 +88,11 @@ class Agent:
         # `run`, because callers of `run_once` have no reason to know
         # `router_stopped` is implemented in terms of `subprocess.run` at all.
         router_stopped: Callable[[], ContextManager[object]] = _real_router_stopped,
+        apply_host=None,
+        rollback_host=None,
+        host_restart: Callable[[], None] | None = None,
+        host_health: Callable[[], bool] | None = None,
+        host_dir: Path | None = None,
     ):
         if fetch is None:
             # A missing `fetch` is a construction mistake, not a runtime
@@ -107,6 +113,11 @@ class Agent:
         self._fetch = fetch
         self._verify = verify or self._default_verify
         self._router_stopped = router_stopped
+        self._apply_host = apply_host or apply_host_tree
+        self._rollback_host = rollback_host or rollback_host_tree
+        self._host_restart = host_restart
+        self._host_health = host_health
+        self.host_dir = Path(host_dir) if host_dir is not None else self.state_dir / "host"
         self.store = StateStore(self.state_dir / "state.json")
 
     def _default_verify(self, manifest: dict, path: Path, last_sequence: int) -> None:
@@ -129,7 +140,24 @@ class Agent:
         """
         from unoq_ota.verify import verify_manifest
 
-        verify_manifest(manifest, self.public_keys, last_sequence, artifact_path=Path(path))
+        verify_manifest(
+            manifest,
+            self.public_keys,
+            last_sequence,
+            artifact_path=Path(path),
+            host_payload_path=(
+                self.state_dir / "staged-host.tar.gz"
+                if isinstance(manifest.get("host_payload"), dict)
+                else None
+            ),
+            target=self.target,
+        )
+
+    def _try_store(self, fn, context: str) -> None:
+        try:
+            fn()
+        except Exception as exc:  # noqa: BLE001 - a full disk must not abort the cycle
+            log.warning("%s: %s", context, exc)
 
     def _set(
         self,
@@ -138,13 +166,36 @@ class Agent:
         *,
         clear_version: bool = False,
     ) -> None:
+        def write():
+            state = self.store.load()
+            state.phase = phase
+            if clear_version:
+                state.version = None
+            elif version is not None:
+                state.version = version
+            self.store.save(state)
+
+        self._try_store(write, f"persist phase {phase.value}")
+
+    def _wait_alive(self, version: str, timeout_s: float, *, context: str) -> str | None:
+        """Return the version that is alive, or None. Exceptions are not-alive."""
+        try:
+            check = self.health_factory(version)
+            wait_alive = getattr(check, "wait_alive", None)
+            if callable(wait_alive):
+                reported = wait_alive(timeout_s)
+                return reported if isinstance(reported, str) and reported else None
+            return version if check.wait_healthy(timeout_s) else None
+        except Exception as exc:  # noqa: BLE001 - same discipline as _is_healthy
+            log.warning("%s: health check raised %r, treating as not alive", context, exc)
+            return None
+
+    def _expected_image_version(self, name: str) -> str | None:
         state = self.store.load()
-        state.phase = phase
-        if clear_version:
-            state.version = None
-        elif version is not None:
-            state.version = version
-        self.store.save(state)
+        return {
+            "current.bin": state.committed_version,
+            "previous.bin": state.previous_version,
+        }.get(name)
 
     def _is_healthy(self, version: str, timeout_s: float, *, context: str) -> bool:
         """Run one health check, treating any exception as "not healthy".
@@ -183,6 +234,36 @@ class Agent:
             Path(tmp).unlink(missing_ok=True)
             raise
 
+    def _host_block(self, update) -> dict | None:
+        block = getattr(update, "manifest", {}).get("host_payload")
+        return block if isinstance(block, dict) else None
+
+    def _apply_host_if_present(self, update) -> bool:
+        """Swap the host tree. False means roll the MCU back too.
+
+        MCU flash has already succeeded. A host failure must not commit:
+        the two sides would disagree. Rollback of the host tree is attempted
+        here; the caller then rolls the MCU.
+        """
+        if self._host_block(update) is None:
+            return True
+        live = self.host_dir
+        archive = self.state_dir / "staged-host.tar.gz"
+        try:
+            self._apply_host(archive, live)
+            if self._host_restart is not None:
+                self._host_restart()
+            if self._host_health is not None and not self._host_health():
+                raise HostError("host health check failed")
+            return True
+        except Exception as exc:  # noqa: BLE001 - host apply is injected
+            log.warning("host apply failed for %s: %s", update.version, exc)
+            try:
+                self._rollback_host(live)
+            except Exception as rollback_exc:  # noqa: BLE001
+                log.warning("host rollback failed: %s", rollback_exc)
+            return False
+
     def run_once(self) -> Phase:
         update = self.source.check()
         if update is None:
@@ -196,7 +277,10 @@ class Agent:
         # link the device has.
         poisoned = self.store.is_poisoned(update.version)
         if poisoned or self.store.attempts_for(update.version) >= MAX_ATTEMPTS:
-            self.store.poison(update.version)
+            self._try_store(
+                lambda: self.store.poison(update.version),
+                f"poison already-capped {update.version}",
+            )
             reason = "version is poisoned" if poisoned else f"exceeded {MAX_ATTEMPTS} attempts"
             self.source.report(update, Status.REJECTED, reason)
             self._set(Phase.REJECTED, update.version)
@@ -214,22 +298,7 @@ class Agent:
         # future "cleanup" to that form would silently decouple this from
         # those tests -- they would keep passing while patching a name
         # nothing here reads.
-        from unoq_ota.preflight import PreflightError, check_clock, check_disk_space
-
-        # `update.manifest` is attacker-controlled until `self._verify(...)`
-        # runs, later in this method -- signature first, so nothing upstream
-        # of it trusts attacker-chosen fields (see verify.py's docstring).
-        # This parse is a structural check only ("is there a usable size at
-        # all"), not a value anything below may act on: a malformed manifest
-        # is reproducible and poisoned here, same as the fetch/verify-failure
-        # branches below.
-        try:
-            int(update.manifest["artifact"]["size"])
-        except (KeyError, TypeError, ValueError):
-            self.store.poison(update.version)
-            self.source.report(update, Status.REJECTED, "manifest has no usable artifact size")
-            self._set(Phase.REJECTED, update.version)
-            return Phase.REJECTED
+        from unoq_ota.preflight import PreflightError, check_clock, check_disk_space, detect_drift
 
         try:
             check_clock()
@@ -276,21 +345,41 @@ class Agent:
             self._set(Phase.IDLE, clear_version=True)
             return Phase.IDLE
 
+        host_block = self._host_block(update)
+        if host_block is not None:
+            host_url = host_block.get("url")
+            if not isinstance(host_url, str) or not host_url:
+                self.source.report(update, Status.REJECTED, "manifest host_payload has no url")
+                self._set(Phase.IDLE, clear_version=True)
+                return Phase.IDLE
+            try:
+                self._fetch(host_url, self.state_dir / "staged-host.tar.gz")
+            except Exception as exc:
+                log.warning("host payload download failed: %s", exc)
+                self.source.report(update, Status.REJECTED, f"host download failed: {exc}")
+                self._set(Phase.IDLE, clear_version=True)
+                return Phase.IDLE
+
         # ---- verify ------------------------------------------------------
         self._set(Phase.VERIFYING, update.version)
         try:
             self._verify(update.manifest, staged, self.store.load().sequence)
             artifact = self._load(staged)
         except (VerificationError, ArtifactError) as exc:
-            # A genuine verification/artifact failure is reproducible: the
-            # same bytes will fail the same way every time, so this version
-            # must both count against the attempt cap and be poisoned --
-            # without `record_attempt`, `attempts_for` stays at zero forever
-            # and only the (previously unused) poison list stood between a
-            # replayed or malformed manifest and a full download/verify/
-            # reject cycle on every pass.
-            self.store.record_attempt(update.version)
-            self.store.poison(update.version)
+            poisonable = isinstance(exc, ArtifactError) or getattr(exc, "poisonable", False)
+            if not poisonable:
+                log.warning("unsigned or transient verify failure for %s: %s", update.version, exc)
+                self.source.report(update, Status.REJECTED, str(exc))
+                self._set(Phase.IDLE, clear_version=True)
+                return Phase.IDLE
+            self._try_store(
+                lambda: self.store.record_attempt(update.version),
+                f"record attempt for {update.version}",
+            )
+            self._try_store(
+                lambda: self.store.poison(update.version),
+                f"poison {update.version}",
+            )
             self.source.report(update, Status.REJECTED, str(exc))
             self._set(Phase.REJECTED, update.version)
             return Phase.REJECTED
@@ -315,7 +404,21 @@ class Agent:
             return Phase.STAGED
 
         # ---- flash -------------------------------------------------------
-        self.store.record_attempt(update.version)
+        believed = self.state_dir / "current.bin"
+        if detect_drift(believed if believed.is_file() else None, self.target.address):
+            if believed.is_file():
+                log.warning(
+                    "resident firmware disagrees with current.bin; discarding believed image"
+                )
+                try:
+                    believed.unlink()
+                except OSError as exc:
+                    log.warning("could not discard drifted current.bin: %s", exc)
+
+        self._try_store(
+            lambda: self.store.record_attempt(update.version),
+            f"record flash attempt for {update.version}",
+        )
         self._set(Phase.FLASHING, update.version)
         self.source.report(update, Status.FLASHING, "writing sketch partition")
         try:
@@ -334,12 +437,15 @@ class Agent:
 
         # ---- health --------------------------------------------------------
         self._set(Phase.HEALTH_CHECK, update.version)
-        if self._is_healthy(
+        mcu_ok = self._is_healthy(
             update.version, HEALTH_TIMEOUT_S, context=f"{update.version}: post-flash check"
-        ):
+        )
+        host_ok = self._apply_host_if_present(update) if mcu_ok else True
+        if mcu_ok and host_ok:
             current = self.state_dir / "current.bin"
             try:
-                if current.is_file():
+                had_current = current.is_file()
+                if had_current:
                     self._atomic_copy(current, self.state_dir / "previous.bin")
                 self._atomic_copy(staged, current)
             except Exception as exc:
@@ -357,10 +463,16 @@ class Agent:
                 self._set(Phase.IDLE, clear_version=True)
                 return Phase.IDLE
             state = self.store.load()
+            if had_current:
+                state.previous_version = state.committed_version
+            state.committed_version = update.version
             state.sequence = update.sequence
             state.phase = Phase.COMMITTED
             state.version = update.version
-            self.store.save(state)
+            self._try_store(
+                lambda: self.store.save(state),
+                f"persist commit for {update.version}",
+            )
             self.source.report(update, Status.COMMITTED, "healthy")
             return Phase.COMMITTED
 
@@ -397,42 +509,34 @@ class Agent:
                 log.warning("rollback candidate %s unusable: %s", name, exc)
                 continue
 
-            if self._is_healthy(
+            reported = self._wait_alive(
                 update.version, HEALTH_TIMEOUT_S, context=f"rollback: {name}"
-            ):
-                # `update.version` is the *bad* firmware's identity. A
-                # health check built for that identity reporting True here
-                # means the device still looks like the bad firmware --
-                # either this candidate's flash did not take, or it took and
-                # the device still answers as the old identity for some
-                # other reason. Either way nothing was restored, so this is
-                # a failure for rollback purposes: fall through to the next
-                # candidate, exactly as reconciler.py does.
+            )
+            if reported is None:
+                log.warning("rollback candidate %s: MCU not alive, trying next", name)
+                continue
+            if reported == update.version:
                 log.warning(
                     "rollback candidate %s: device still reports %s, treating as failed",
                     name,
                     update.version,
                 )
                 continue
+            expected = self._expected_image_version(name)
+            if expected is not None and reported != expected:
+                log.warning(
+                    "rollback candidate %s: reported %s, expected %s, trying next",
+                    name,
+                    reported,
+                    expected,
+                )
+                continue
 
-            # `False` is uninformative here, not a confirmation: the image
-            # just restored is a *different* version than `update.version`,
-            # so a health check built for `update.version`'s identity cannot
-            # assert that the restored image is actually healthy -- only
-            # that the device no longer identifies as the bad one. Genuine
-            # health confirmation of the restored image happens later, at
-            # next boot, in `reconciler.py`. The reported detail says so
-            # explicitly rather than implying a confirmation that never
-            # happened.
             self.source.report(
                 update,
                 Status.ROLLED_BACK,
-                f"restored {name}, health unconfirmed until next boot",
+                f"restored {name} running {reported}",
             )
-            # Not `update.version`: that is the poisoned firmware this
-            # rollback just moved away from, not what the device is running
-            # now. Leaving it in `state.version` would describe the wrong
-            # firmware as current.
             self._set(Phase.ROLLED_BACK, clear_version=True)
             return Phase.ROLLED_BACK
 

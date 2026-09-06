@@ -86,4 +86,14 @@ class HealthCheck(Protocol):
     on a timer whether or not it is doing its job.
     """
 
-    def wait_healthy(self, timeout_s: float) -> bool: ...
+    def wait_healthy(self, timeout_s: float) -> bool:
+        """True when the flashed version is alive, identified, and progressing."""
+        ...
+
+    def wait_alive(self, timeout_s: float) -> str | None:
+        """Return the version that is alive and progressing, or None.
+
+        Unlike wait_healthy this does not pin an expected identity. Boot
+        recovery uses it: any live sketch is enough to leave the MCU alone.
+        """
+        ...

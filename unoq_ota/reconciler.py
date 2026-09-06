@@ -52,21 +52,19 @@ class ReconcileResult:
     image: str | None = None
 
 
-def _is_healthy(health: HealthCheck, timeout_s: float, *, context: str) -> bool:
-    """Run one health check, treating any exception as "not healthy".
+def _is_alive(health: HealthCheck, timeout_s: float, *, context: str) -> bool:
+    """True when *some* firmware is alive, regardless of version.
 
-    A health check that raises is not evidence the board is fine -- it is
-    exactly the kind of failure this module exists to survive. The real
-    `HealthCheck` shells out to a subprocess and reads a temp file, so
-    `subprocess` errors, `OSError`, and decoding failures are all live
-    possibilities; there is no fixed set of exception types to name here,
-    so this deliberately catches broadly.
+    Boot recovery cannot pin an expected identity: the resident image may
+    be golden, a prior rollback, or an IDE upload the agent never saw.
+    Any exception is treated as not alive so remaining candidates still run.
     """
     try:
-        return health.wait_healthy(timeout_s)
-    except Exception as exc:  # noqa: BLE001 - see docstring above
+        reported = health.wait_alive(timeout_s)
+    except Exception as exc:  # noqa: BLE001 - see module docstring
         _LOG.warning("%s: health check raised %r, treating as unhealthy", context, exc)
         return False
+    return bool(reported)
 
 
 def reconcile(
@@ -81,7 +79,7 @@ def reconcile(
 ) -> ReconcileResult:
     state_dir = Path(state_dir)
 
-    if _is_healthy(health, initial_timeout_s, context="initial check"):
+    if _is_alive(health, initial_timeout_s, context="initial check"):
         return ReconcileResult(healthy=True, action="none")
 
     for name in CANDIDATES:
@@ -122,7 +120,7 @@ def reconcile(
             # concrete implementation does.
             _LOG.warning("%s: flash() raised %r, skipping candidate", name, exc)
             continue
-        if _is_healthy(health, post_flash_timeout_s, context=f"{name}: post-flash check"):
+        if _is_alive(health, post_flash_timeout_s, context=f"{name}: post-flash check"):
             return ReconcileResult(healthy=True, action="reflashed", image=name)
 
     return ReconcileResult(healthy=False, action="exhausted")

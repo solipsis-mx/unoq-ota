@@ -33,7 +33,7 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 
 HEALTH_RE = re.compile(r"^OTA-HEALTH\s+(\S+)\s+seq=(\d+)\s*$")
-DEFAULT_MONITOR_CMD = ["arduino-app-cli", "monitor"]
+DEFAULT_MONITOR_ADDR = ("127.0.0.1", 7500)
 
 
 def parse_health_line(line: str) -> tuple[str, int] | None:
@@ -46,15 +46,60 @@ def parse_health_line(line: str) -> tuple[str, int] | None:
 class VersionReportHealthCheck:
     def __init__(
         self,
-        expected_version: str,
+        expected_version: str | None = None,
         monitor_cmd: list[str] | None = None,
         min_reports: int = 2,
+        monitor_addr: tuple[str, int] | None = None,
     ) -> None:
         self.expected_version = expected_version
-        self.monitor_cmd = list(monitor_cmd or DEFAULT_MONITOR_CMD)
+        self.monitor_cmd = list(monitor_cmd) if monitor_cmd is not None else None
+        self.monitor_addr = monitor_addr or DEFAULT_MONITOR_ADDR
         self.min_reports = min_reports
 
     def _collect(self, timeout_s: float) -> list[str]:
+        if self.monitor_cmd is not None:
+            return self._collect_cmd(timeout_s)
+        return self._collect_tcp(timeout_s)
+
+    def _collect_tcp(self, timeout_s: float) -> list[str]:
+        """Read raw sketch output from arduino-router's local monitor port.
+
+        On the UNO Q, `arduino-app-cli monitor` accepts a connection but
+        writes nothing to stdout when not a TTY. The bytes are on
+        127.0.0.1:7500. Serial.print without a monitor attached is also
+        parsed as the router's packet protocol and dropped -- so this
+        connection is what actually diverts the stream to us.
+        """
+        import socket
+        import time
+
+        host, port = self.monitor_addr
+        deadline = time.monotonic() + timeout_s
+        buf = b""
+        try:
+            sock = socket.create_connection((host, port), timeout=min(timeout_s, 5.0))
+        except OSError:
+            logger.warning(
+                "health check: could not connect to %s:%s", host, port, exc_info=True
+            )
+            return []
+        try:
+            sock.settimeout(0.5)
+            while time.monotonic() < deadline:
+                try:
+                    chunk = sock.recv(4096)
+                except socket.timeout:
+                    continue
+                if not chunk:
+                    break
+                buf += chunk
+        except OSError:
+            logger.warning("health check: error reading %s:%s", host, port, exc_info=True)
+        finally:
+            sock.close()
+        return buf.decode("utf-8", errors="replace").splitlines()
+
+    def _collect_cmd(self, timeout_s: float) -> list[str]:
         """Run the monitor for timeout_s, capturing to a file.
 
         Never pipe: an interrupted pipe can discard everything buffered, and
@@ -100,13 +145,36 @@ class VersionReportHealthCheck:
         finally:
             log.unlink(missing_ok=True)
 
-    def wait_healthy(self, timeout_s: float) -> bool:
+    def _reports(self, timeout_s: float) -> list[tuple[str, int]]:
         reports = []
         for line in self._collect(timeout_s):
             parsed = parse_health_line(line)
             if parsed is not None:
                 reports.append(parsed)
+        return reports
 
+    def wait_alive(self, timeout_s: float) -> str | None:
+        """Return the version that showed liveness and progress, or None.
+
+        Identity is not required: the boot reconciler has to accept whatever
+        firmware is running, including an image the agent never flashed.
+        Ambiguous output (two versions both progressing in one window) is
+        treated as not alive.
+        """
+        by_version: dict[str, list[int]] = {}
+        for version, seq in self._reports(timeout_s):
+            by_version.setdefault(version, []).append(seq)
+        alive = [
+            version
+            for version, seqs in by_version.items()
+            if len(seqs) >= self.min_reports and self._progressed(seqs)
+        ]
+        if len(alive) != 1:
+            return None
+        return alive[0]
+
+    def wait_healthy(self, timeout_s: float) -> bool:
+        reports = self._reports(timeout_s)
         matching = [seq for version, seq in reports if version == self.expected_version]
         if len(matching) < self.min_reports:
             return False

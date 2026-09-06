@@ -3,7 +3,11 @@
 from __future__ import annotations
 
 import argparse
+import json
 import logging
+import os
+import socket
+import subprocess
 import time
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -11,6 +15,7 @@ from urllib.parse import urlsplit
 from unoq_ota.agent import Agent
 from unoq_ota.artifact import load_artifact
 from unoq_ota.board import resolve_flash_target
+from unoq_ota.events import JOURNAL_NAME, EventLog
 from unoq_ota.flasher import read_partition
 from unoq_ota.gates.always import AlwaysGate
 from unoq_ota.health.version_report import VersionReportHealthCheck
@@ -18,6 +23,7 @@ from unoq_ota.keyring import load_keyring
 from unoq_ota.reconciler import reconcile
 from unoq_ota.sources.http_manifest import HttpManifestSource, download
 from unoq_ota.sources.local import LocalFileSource
+from unoq_ota.sources.reporting import ReportingSource
 from unoq_ota.state import DEFAULT_STATE_DIR, StateStore
 
 log = logging.getLogger(__name__)
@@ -71,6 +77,76 @@ def _fetch(url: str, dest: Path, source_dir: Path | None) -> None:
     dest.write_bytes(src.read_bytes())
 
 
+def _resolve_device_id(args) -> str:
+    return getattr(args, "device_id", None) or socket.gethostname()
+
+
+def _event_log(args) -> EventLog:
+    report_url = getattr(args, "report_url", None) or None
+    return EventLog(
+        Path(args.state_dir) / JOURNAL_NAME,
+        device_id=_resolve_device_id(args),
+        report_url=report_url,
+    )
+
+
+def _print_status(args) -> int:
+    store = StateStore(Path(args.state_dir) / "state.json")
+    state = store.load()
+    events = _event_log(args)
+    payload = {
+        "device": events.device_id,
+        "phase": state.phase.value,
+        "version": state.version,
+        "committed_version": state.committed_version,
+        "previous_version": state.previous_version,
+        "sequence": state.sequence,
+        "poisoned": state.poisoned,
+        "last_event": events.last(),
+    }
+    if getattr(args, "json", False):
+        print(json.dumps(payload, indent=2))
+        return 0
+    last = payload["last_event"]
+    print(f"device={payload['device']}")
+    print(f"phase={payload['phase']}")
+    print(f"version={payload['version']}")
+    print(f"committed_version={payload['committed_version']}")
+    print(f"sequence={payload['sequence']}")
+    if last:
+        print(f"last_event={last.get('kind')} {last.get('status') or last.get('action')} {last.get('detail') or last.get('image') or ''}".rstrip())
+    else:
+        print("last_event=")
+    return 0
+
+
+def _host_hooks(args):
+    """Optional systemd restart + liveness for a host payload.
+
+    Site-specific: the operator names the unit. This package never assumes
+    what Linux software sits next to the sketch.
+    """
+    unit = getattr(args, "host_unit", None)
+    if not unit:
+        return None, None
+
+    def restart():
+        subprocess.run(["systemctl", "restart", unit], check=False, timeout=120)
+
+    def healthy():
+        try:
+            proc = subprocess.run(
+                ["systemctl", "is-active", "--quiet", unit],
+                check=False,
+                timeout=30,
+            )
+            return proc.returncode == 0
+        except OSError:
+            return False
+
+    return restart, healthy
+
+
 def _run(args, run_parser: argparse.ArgumentParser) -> int:
     """Wire a source, the gate, health checks and the store into an Agent.
 
@@ -102,6 +178,10 @@ def _run(args, run_parser: argparse.ArgumentParser) -> int:
         )
         fetch = lambda url, dest: _fetch(url, dest, None)  # noqa: E731
 
+    source = ReportingSource(source, _event_log(args))
+    host_restart, host_health = _host_hooks(args)
+    host_dir = getattr(args, "host_dir", None)
+
     agent = Agent(
         state_dir=args.state_dir,
         source=source,
@@ -110,6 +190,9 @@ def _run(args, run_parser: argparse.ArgumentParser) -> int:
         target=target,
         public_keys=public_keys,
         fetch=fetch,
+        host_dir=host_dir,
+        host_restart=host_restart,
+        host_health=host_health,
     )
 
     while True:
@@ -120,13 +203,26 @@ def _run(args, run_parser: argparse.ArgumentParser) -> int:
         time.sleep(args.poll_interval)
 
 
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(prog="unoq-ota")
     parser.add_argument("--state-dir", type=Path, default=DEFAULT_STATE_DIR)
     parser.add_argument("--verbose", action="store_true")
+    parser.add_argument(
+        "--report-url",
+        default=os.environ.get("UNOQ_OTA_REPORT_URL"),
+        help="POST each OTA event as JSON (also reads UNOQ_OTA_REPORT_URL)",
+    )
+    parser.add_argument(
+        "--device-id",
+        default=os.environ.get("UNOQ_OTA_DEVICE_ID"),
+        help="identity in journal and reports (default: hostname, or UNOQ_OTA_DEVICE_ID)",
+    )
     sub = parser.add_subparsers(dest="command", required=True)
 
     sub.add_parser("reconcile", help="recover the MCU if it is not healthy")
+    status = sub.add_parser("status", help="print agent state and the last journal event")
+    status.add_argument("--json", action="store_true")
     sub.add_parser("target", help="print the resolved flash target")
 
     backup = sub.add_parser("backup", help="dump the resident sketch to a file")
@@ -152,11 +248,22 @@ def main(argv=None) -> int:
         "--jitter", type=float, default=30.0, help="max random delay before an http poll (seconds)"
     )
     run.add_argument("--once", action="store_true", help="run a single cycle and exit")
+    run.add_argument(
+        "--host-dir",
+        type=Path,
+        default=None,
+        help="directory to unpack host_payload into (default: <state-dir>/host)",
+    )
+    run.add_argument(
+        "--host-unit",
+        default=None,
+        help="systemd unit to restart after applying host_payload, then require active",
+    )
 
     args = parser.parse_args(argv)
     logging.basicConfig(
         level=logging.DEBUG if args.verbose else logging.INFO,
-        format="%(levelname)s %(message)s",
+        format="%(levelname)s %(name)s: %(message)s",
     )
 
     if args.command == "target":
@@ -174,10 +281,19 @@ def main(argv=None) -> int:
         print(f"dumped {args.length} bytes to {args.out}")
         return 0
 
+    if args.command == "status":
+        return _print_status(args)
+
     if args.command == "reconcile":
         target = resolve_flash_target()
-        health = VersionReportHealthCheck(expected_version="")
+        health = VersionReportHealthCheck()
         result = reconcile(args.state_dir, health, target)
+        _event_log(args).record(
+            kind="reconcile",
+            action=result.action,
+            image=result.image,
+            healthy=result.healthy,
+        )
         print(f"healthy={result.healthy} action={result.action} image={result.image}")
         return 0 if result.healthy else 1
 

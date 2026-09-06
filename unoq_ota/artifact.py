@@ -64,7 +64,10 @@ def parse_header(data: bytes) -> SketchHeader:
 
 def load_artifact(path: Path) -> SketchArtifact:
     """Load and fully validate an artifact. Raises ArtifactError if unsafe."""
-    data = Path(path).read_bytes()
+    try:
+        data = Path(path).read_bytes()
+    except OSError as exc:
+        raise ArtifactError(f"could not read artifact at {path}: {exc}") from exc
     size = len(data)
 
     if size < 52:
