@@ -7,6 +7,7 @@ import argparse
 import base64
 import hashlib
 import json
+import sys
 from datetime import datetime
 from pathlib import Path
 
@@ -51,6 +52,12 @@ def main() -> int:
     parser.add_argument("--url", required=True)
     parser.add_argument("--private-key", type=Path, required=True)
     parser.add_argument("--key-id", required=True)
+    parser.add_argument(
+        "--out",
+        type=Path,
+        default=None,
+        help="write the manifest here (default: stdout, so it can be redirected)",
+    )
     parser.add_argument("--sketch-offset", default="0x08100000")
     parser.add_argument("--partition-size", type=int, default=786432)
     parser.add_argument(
@@ -134,8 +141,16 @@ def main() -> int:
         "sig": base64.b64encode(key.sign(canonical_bytes(manifest))).decode(),
     }
 
-    args.out.write_text(json.dumps(manifest, indent=2) + "\n")
-    print(f"signed {validated.size} bytes -> {args.out}")
+    document = json.dumps(manifest, indent=2) + "\n"
+    if args.out is None:
+        # The manifest is the output of this program; anything else it has to
+        # say goes to stderr, so `sign-artifact.py ... > manifest.json` stays
+        # a valid document.
+        sys.stdout.write(document)
+        print(f"signed {validated.size} bytes -> stdout", file=sys.stderr)
+    else:
+        args.out.write_text(document)
+        print(f"signed {validated.size} bytes -> {args.out}")
     return 0
 
 
