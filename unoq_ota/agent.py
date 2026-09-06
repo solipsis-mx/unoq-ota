@@ -172,6 +172,12 @@ class Agent:
         def write():
             state = self.store.load()
             state.phase = phase
+            # The offset and partition size this agent flashes with come from
+            # whichever Arduino core is installed, so the answer to "which
+            # core said that?" belongs in the same file as the rest of the
+            # story. Recorded on every transition rather than only at commit:
+            # a core upgrade between cycles is exactly the case worth seeing.
+            state.core_version = getattr(self.target, "core_version", None)
             if clear_version:
                 state.version = None
             elif version is not None:

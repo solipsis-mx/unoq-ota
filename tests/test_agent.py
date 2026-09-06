@@ -1165,3 +1165,14 @@ def test_the_host_reserve_is_configurable(tmp_path, monkeypatch):
 
     assert agent.run_once() == Phase.COMMITTED
     assert (tmp_path, TARGET.max_size + 64_000_000) in seen
+
+
+def test_records_which_core_supplied_the_flash_target(tmp_path):
+    # state.json carries a core_version field that nothing ever wrote. The
+    # offset and partition size come from whichever Arduino core is
+    # installed, so recording which one was in use is what makes a stale
+    # offset diagnosable after the fact.
+    agent = _agent(tmp_path, StubSource(_update()), StubGate(), StubHealth([True]))
+
+    assert agent.run_once() == Phase.COMMITTED
+    assert StateStore(tmp_path / "state.json").load().core_version == TARGET.core_version
