@@ -8,7 +8,7 @@ authors = [{name = "Solipsis MX"}]
 requires-python = ">=3.9"
 dependencies = ["requests>=2.25", "cryptography>=3.4"]
 classifiers = [
-    "License :: OSI Approved :: MIT License",
+    "License :: OSI Approved :: GNU General Public License v3 or later (GPLv3+)",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.9",
     "Topic :: Software Development :: Embedded Systems",

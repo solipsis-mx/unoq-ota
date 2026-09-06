@@ -1,5 +1,5 @@
 // SPDX-FileCopyrightText: 2026 Solipsis MX and the unoq-ota contributors
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-or-later
 /*
  * unoq-ota — health report contract
  *

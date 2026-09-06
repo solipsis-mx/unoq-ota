@@ -212,7 +212,11 @@ welcome. Cursor and Claude are co-collaborators; see [AUTHORS.md](AUTHORS.md).
 
 ## License
 
-MIT. See [LICENSE](LICENSE), [NOTICE](NOTICE), and [LICENSES/MIT.txt](LICENSES/MIT.txt).
+GNU GPL version 3 or later — the same family Arduino uses for tools such as
+[arduino-cli](https://github.com/arduino/arduino-cli). The [LICENSE](LICENSE)
+file is the verbatim GPL-3.0 text (so GitHub and other scanners can identify
+it). Copyright is in [NOTICE](NOTICE); machine-readable SPDX is in
+[REUSE.toml](REUSE.toml) (`GPL-3.0-or-later`).
 
 Arduino, Arduino UNO Q, and related names are trademarks of Arduino SA.
 This project is not affiliated with Arduino.

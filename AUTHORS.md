@@ -17,7 +17,8 @@ not as unnamed autocomplete:
 | [Claude](https://claude.ai) (Anthropic) | Coding agent. Same trailer convention (`Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>`). |
 
 They do not hold a separate copyright. Contributions they produced are
-released under the same [MIT](LICENSE) license as the rest of the tree.
+released under the same [GPL-3.0-or-later](LICENSE) license as the rest of
+the tree.
 
 ## Human contributors
 
