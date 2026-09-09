@@ -10,3 +10,6 @@ from __future__ import annotations
 class AlwaysGate:
     def may_flash(self):
         return True, "always allowed"
+
+    def may_fetch(self):
+        return True, "always allowed"
