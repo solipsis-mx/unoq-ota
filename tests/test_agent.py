@@ -145,7 +145,7 @@ def _update(version="1.0.0", sequence=1):
 
 
 def _agent(
-    tmp_path, source, gate, health, flashed=None, verify_ok=True, health_factory=None, verify_error=None
+    tmp_path, source, gate, health, flashed=None, verify_ok=True, health_factory=None, verify_error=None, no_flash=False
 ):
     def fetch(url, dest):
         Path(dest).write_bytes(make_artifact_bytes())
@@ -171,6 +171,7 @@ def _agent(
         fetch=fetch,
         verify=verify,
         router_stopped=_fake_router_stopped,
+        no_flash=no_flash,
     )
 
 
@@ -622,6 +623,25 @@ def test_skips_download_when_sequence_not_newer_than_committed_sequence(tmp_path
     assert result == Phase.IDLE
     assert fetch_calls == []
     assert flashed == []
+
+
+def test_no_flash_verifies_without_flashing_and_stamps_watermark(tmp_path):
+    flashed = []
+    source = StubSource(_update(version="probe-2", sequence=12))
+    agent = _agent(tmp_path, source, StubGate(), StubHealth([True, True]), flashed)
+    agent.no_flash = True
+
+    result = agent.run_once()
+
+    assert result == Phase.IDLE
+    assert flashed == []
+    assert not (tmp_path / "staged.bin").exists()
+    state = StateStore(tmp_path / "state.json").load()
+    assert state.last_verified_sequence == 12
+    assert state.last_verified_version == "probe-2"
+    assert state.sequence == 0
+    assert state.committed_version is None
+    assert any(status == Status.VERIFIED for status, _ in source.reports)
 
 
 def test_a_poisoned_version_is_rejected_without_downloading(tmp_path):

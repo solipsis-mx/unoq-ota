@@ -27,6 +27,7 @@ class Status(str, Enum):
     COMMITTED = "committed"
     ROLLED_BACK = "rolled_back"
     REJECTED = "rejected"
+    VERIFIED = "verified"
 
 
 @dataclass(frozen=True)

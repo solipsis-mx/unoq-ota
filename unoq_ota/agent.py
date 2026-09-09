@@ -95,6 +95,7 @@ class Agent:
         host_health: Callable[[], bool] | None = None,
         host_dir: Path | None = None,
         host_max_bytes: int = MAX_PAYLOAD_BYTES,
+        no_flash: bool = False,
     ):
         if fetch is None:
             # A missing `fetch` is a construction mistake, not a runtime
@@ -121,6 +122,7 @@ class Agent:
         self._host_health = host_health
         self.host_dir = Path(host_dir) if host_dir is not None else self.state_dir / "host"
         self.host_max_bytes = host_max_bytes
+        self.no_flash = no_flash
         self.store = StateStore(self.state_dir / "state.json")
 
     def _default_verify(self, manifest: dict, path: Path, last_sequence: int) -> None:
@@ -432,6 +434,17 @@ class Agent:
             # failure above is handled.
             log.warning("unexpected error verifying %s: %s", update.version, exc)
             self.source.report(update, Status.REJECTED, f"verify/load error: {exc}")
+            self._set(Phase.IDLE, clear_version=True)
+            return Phase.IDLE
+
+        if self.no_flash:
+            state = self.store.load()
+            state.last_verified_sequence = update.sequence
+            state.last_verified_version = update.version
+            self.store.save(state)
+            staged.unlink(missing_ok=True)
+            (self.state_dir / "staged-host.tar.gz").unlink(missing_ok=True)
+            self.source.report(update, Status.VERIFIED, "verified, not applied")
             self._set(Phase.IDLE, clear_version=True)
             return Phase.IDLE
 
