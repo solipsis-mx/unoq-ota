@@ -42,3 +42,13 @@ def test_agent_unit_documents_once_no_flash_oneshot():
     text = (ROOT / "systemd" / "unoq-ota.service").read_text()
     assert "--once" in text
     assert "--no-flash" in text
+
+
+def test_jobs_unit_is_a_long_running_listener():
+    text = (ROOT / "systemd" / "unoq-ota-jobs.service").read_text()
+    assert "Type=simple" in text
+    assert "Restart=always" in text
+    assert "User=root" in text
+    assert "EnvironmentFile=-/etc/unoq-ota/agent.env" in text
+    assert "ExecStart=/usr/local/bin/unoq-ota jobs" in text
+    assert "solipsis" not in text.lower()

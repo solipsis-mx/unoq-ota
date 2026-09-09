@@ -1,0 +1,34 @@
+[Unit]
+Description=unoq-ota IoT Jobs poke listener
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Long-running MQTT client. On a qualifying job it runs one verify-only
+# cycle of the configured source (the same Agent as `run`, with no_flash).
+# `--source`, `--keys-dir`, and `--manifest-url` / `--source-dir` have no
+# site-wide default; supply them via a drop-in:
+#   systemctl edit unoq-ota-jobs.service
+#   [Service]
+#   ExecStart=
+#   ExecStart=/usr/local/bin/unoq-ota jobs --source s3 --manifest-url s3://bucket/manifest.json --keys-dir /etc/unoq-ota/keys
+# IoT endpoint, cert, key, CA, and thing name come from
+# /etc/unoq-ota/agent.env (UNOQ_OTA_IOT_ENDPOINT, UNOQ_OTA_IOT_CERT,
+# UNOQ_OTA_IOT_KEY, UNOQ_OTA_IOT_CA, UNOQ_OTA_IOT_THING). MQTT clientId
+# defaults to {thing}-ota (UNOQ_OTA_MQTT_CLIENT_ID); it must not equal
+# the telemetry clientId or it will kick that connection.
+# Also optional there: UNOQ_OTA_CORE_ROOT, UNOQ_OTA_REPORT_URL,
+# UNOQ_OTA_DEVICE_ID. Requires: pip install 'unoq-ota[aws]' (and
+# 'unoq-ota[s3]' when --source s3).
+EnvironmentFile=-/etc/unoq-ota/agent.env
+ExecStart=/usr/local/bin/unoq-ota jobs
+Restart=always
+RestartSec=30
+SyslogIdentifier=unoq-ota-jobs
+StandardOutput=journal
+StandardError=journal
+User=root
+
+[Install]
+WantedBy=multi-user.target

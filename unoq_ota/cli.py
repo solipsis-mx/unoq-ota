@@ -19,6 +19,11 @@ from unoq_ota.events import JOURNAL_NAME, EventLog
 from unoq_ota.flasher import read_partition
 from unoq_ota.gates.always import AlwaysGate
 from unoq_ota.health.version_report import VersionReportHealthCheck
+from unoq_ota.jobs_runner import (
+    build_aws_jobs_client,
+    default_mqtt_client_id,
+    run_jobs_loop,
+)
 from unoq_ota.keyring import load_keyring
 from unoq_ota.preflight import MAX_PAYLOAD_BYTES
 from unoq_ota.reconciler import reconcile
@@ -150,7 +155,7 @@ def _host_hooks(args):
     return restart, healthy
 
 
-def _run(args, run_parser: argparse.ArgumentParser) -> int:
+def _build_agent(args, source_parser: argparse.ArgumentParser) -> Agent:
     """Wire a source, the gate, health checks and the store into an Agent.
 
     This is the composition root: the only place anything in this package
@@ -176,12 +181,12 @@ def _run(args, run_parser: argparse.ArgumentParser) -> int:
 
     if args.source == "local":
         if not args.source_dir:
-            run_parser.error("--source local requires --source-dir")
+            source_parser.error("--source local requires --source-dir")
         source = LocalFileSource(args.source_dir, poisoned=store.is_poisoned)
         fetch = lambda url, dest: _fetch(url, dest, args.source_dir, max_payload)  # noqa: E731
     else:
         if not args.manifest_url:
-            run_parser.error("--source http requires --manifest-url")
+            source_parser.error("--source http requires --manifest-url")
         source = HttpManifestSource(
             args.manifest_url, poisoned=store.is_poisoned, jitter_s=args.jitter
         )
@@ -191,7 +196,7 @@ def _run(args, run_parser: argparse.ArgumentParser) -> int:
     host_restart, host_health = _host_hooks(args)
     host_dir = getattr(args, "host_dir", None)
 
-    agent = Agent(
+    return Agent(
         state_dir=args.state_dir,
         source=source,
         gate=AlwaysGate(),
@@ -206,6 +211,9 @@ def _run(args, run_parser: argparse.ArgumentParser) -> int:
         no_flash=args.no_flash,
     )
 
+
+def _run(args, run_parser: argparse.ArgumentParser) -> int:
+    agent = _build_agent(args, run_parser)
     while True:
         phase = agent.run_once()
         log.info("cycle complete: phase=%s", phase.value)
@@ -214,7 +222,39 @@ def _run(args, run_parser: argparse.ArgumentParser) -> int:
         time.sleep(args.poll_interval)
 
 
-def _dispatch(args, run_parser: argparse.ArgumentParser) -> int:
+def _jobs(args, jobs_parser: argparse.ArgumentParser) -> int:
+    """Listen for IoT Jobs and run one verify-only cycle per poke."""
+    missing = []
+    if not getattr(args, "iot_endpoint", None):
+        missing.append("--iot-endpoint (or UNOQ_OTA_IOT_ENDPOINT)")
+    if not getattr(args, "iot_cert", None):
+        missing.append("--iot-cert (or UNOQ_OTA_IOT_CERT)")
+    if not getattr(args, "iot_key", None):
+        missing.append("--iot-key (or UNOQ_OTA_IOT_KEY)")
+    if not getattr(args, "iot_ca", None):
+        missing.append("--iot-ca (or UNOQ_OTA_IOT_CA)")
+    if not getattr(args, "thing_name", None):
+        missing.append("--thing-name (or UNOQ_OTA_IOT_THING)")
+    if missing:
+        jobs_parser.error("jobs requires " + ", ".join(missing))
+
+    args.no_flash = True
+    agent = _build_agent(args, jobs_parser)
+    thing_name = args.thing_name
+    client_id = args.mqtt_client_id or default_mqtt_client_id(thing_name)
+    client = build_aws_jobs_client(
+        endpoint=args.iot_endpoint,
+        cert_filepath=str(args.iot_cert),
+        pri_key_filepath=str(args.iot_key),
+        ca_filepath=str(args.iot_ca),
+        thing_name=thing_name,
+        client_id=client_id,
+    )
+    run_jobs_loop(client, agent.run_once)
+    return 0
+
+
+def _dispatch(args, run_parser: argparse.ArgumentParser, jobs_parser: argparse.ArgumentParser | None = None) -> int:
     if args.command == "target":
         print(resolve_flash_target(args.core_root))
         return 0
@@ -248,6 +288,9 @@ def _dispatch(args, run_parser: argparse.ArgumentParser) -> int:
 
     if args.command == "run":
         return _run(args, run_parser)
+
+    if args.command == "jobs":
+        return _jobs(args, jobs_parser or run_parser)
 
     return 2
 
@@ -294,32 +337,27 @@ def main(argv=None) -> int:
     validate = sub.add_parser("validate", help="check an artifact without flashing")
     validate.add_argument("artifact", type=Path)
 
-    run = sub.add_parser("run", help="continuously fetch, verify and apply updates")
-    run.add_argument("--source", choices=("local", "http"), required=True)
-    run.add_argument(
+    source_parent = argparse.ArgumentParser(add_help=False)
+    source_parent.add_argument("--source", choices=("local", "http"), required=True)
+    source_parent.add_argument(
         "--source-dir", type=Path, default=None, help="directory holding manifest.json (local source)"
     )
-    run.add_argument(
+    source_parent.add_argument(
         "--manifest-url", default=None, help="URL to poll for manifest.json (http source)"
     )
-    run.add_argument(
+    source_parent.add_argument(
         "--keys-dir", type=Path, required=True, help="directory of <key_id>.public.b64 trusted keys"
     )
-    run.add_argument("--poll-interval", type=float, default=300.0, help="seconds between checks")
-    run.add_argument(
+    source_parent.add_argument(
         "--jitter", type=float, default=30.0, help="max random delay before an http poll (seconds)"
     )
-    run.add_argument("--once", action="store_true", help="run a single cycle and exit")
-    run.add_argument(
-        "--no-flash", action="store_true", help="verify only; never flash"
-    )
-    run.add_argument(
+    source_parent.add_argument(
         "--host-dir",
         type=Path,
         default=None,
         help="directory to unpack host_payload into (default: <state-dir>/host)",
     )
-    run.add_argument(
+    source_parent.add_argument(
         "--max-payload-bytes",
         type=int,
         default=MAX_PAYLOAD_BYTES,
@@ -328,10 +366,60 @@ def main(argv=None) -> int:
             f"room reserved for one in the disk preflight (default: {MAX_PAYLOAD_BYTES})"
         ),
     )
-    run.add_argument(
+    source_parent.add_argument(
         "--host-unit",
         default=None,
         help="systemd unit to restart after applying host_payload, then require active",
+    )
+
+    run = sub.add_parser(
+        "run",
+        parents=[source_parent],
+        help="continuously fetch, verify and apply updates",
+    )
+    run.add_argument("--poll-interval", type=float, default=300.0, help="seconds between checks")
+    run.add_argument("--once", action="store_true", help="run a single cycle and exit")
+    run.add_argument(
+        "--no-flash", action="store_true", help="verify only; never flash"
+    )
+
+    jobs = sub.add_parser(
+        "jobs",
+        parents=[source_parent],
+        help="listen for IoT Jobs and run one verify-only cycle per poke",
+    )
+    jobs.add_argument(
+        "--iot-endpoint",
+        default=os.environ.get("UNOQ_OTA_IOT_ENDPOINT"),
+        help="AWS IoT data endpoint (also reads UNOQ_OTA_IOT_ENDPOINT)",
+    )
+    jobs.add_argument(
+        "--iot-cert",
+        type=Path,
+        default=os.environ.get("UNOQ_OTA_IOT_CERT"),
+        help="device certificate path (also reads UNOQ_OTA_IOT_CERT)",
+    )
+    jobs.add_argument(
+        "--iot-key",
+        type=Path,
+        default=os.environ.get("UNOQ_OTA_IOT_KEY"),
+        help="device private key path (also reads UNOQ_OTA_IOT_KEY)",
+    )
+    jobs.add_argument(
+        "--iot-ca",
+        type=Path,
+        default=os.environ.get("UNOQ_OTA_IOT_CA"),
+        help="Amazon root CA path (also reads UNOQ_OTA_IOT_CA)",
+    )
+    jobs.add_argument(
+        "--thing-name",
+        default=os.environ.get("UNOQ_OTA_IOT_THING"),
+        help="IoT thing name (also reads UNOQ_OTA_IOT_THING)",
+    )
+    jobs.add_argument(
+        "--mqtt-client-id",
+        default=os.environ.get("UNOQ_OTA_MQTT_CLIENT_ID"),
+        help="MQTT clientId (default: {thing}-ota, also reads UNOQ_OTA_MQTT_CLIENT_ID)",
     )
 
     args = parser.parse_args(argv)
@@ -341,7 +429,7 @@ def main(argv=None) -> int:
     )
 
     try:
-        return _dispatch(args, run)
+        return _dispatch(args, run, jobs)
     except StateError as exc:
         # The one condition where the agent's own state is present but
         # unreadable. It is an ownership problem on the device, not a bug to

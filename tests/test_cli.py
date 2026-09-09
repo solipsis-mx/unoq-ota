@@ -268,6 +268,38 @@ def test_run_passes_no_flash_to_agent(monkeypatch, tmp_path):
     assert captured["no_flash"] is True
 
 
+def test_jobs_forces_no_flash_and_starts_the_loop(monkeypatch, tmp_path):
+    captured = {}
+    seen = {}
+    monkeypatch.setattr(cli, "resolve_flash_target", _fake_target)
+    _patch_agent(monkeypatch, captured)
+    monkeypatch.setattr(
+        cli,
+        "build_aws_jobs_client",
+        lambda **kwargs: seen.setdefault("client_kwargs", kwargs) or object(),
+    )
+    monkeypatch.setattr(
+        cli,
+        "run_jobs_loop",
+        lambda client, run_cycle: seen.setdefault("cycled", run_cycle()),
+    )
+    (tmp_path / "keys").mkdir()
+    args = _run_args(
+        tmp_path,
+        iot_endpoint="endpoint.example.invalid",
+        iot_cert=tmp_path / "cert.pem",
+        iot_key=tmp_path / "key.pem",
+        iot_ca=tmp_path / "ca.pem",
+        thing_name="board-1",
+        mqtt_client_id=None,
+    )
+    assert cli._jobs(args, argparse.ArgumentParser()) == 0
+    assert captured["no_flash"] is True
+    assert seen["cycled"] == Phase.IDLE
+    assert seen["client_kwargs"]["client_id"] == "board-1-ota"
+    assert seen["client_kwargs"]["thing_name"] == "board-1"
+
+
 def test_run_once_runs_a_single_cycle_and_returns_without_sleeping(monkeypatch, tmp_path):
     calls = {"run_once": 0, "sleep": 0}
     monkeypatch.setattr(cli, "resolve_flash_target", _fake_target)
@@ -332,6 +364,15 @@ def test_main_run_help_exits_cleanly():
     with pytest.raises(SystemExit) as exc_info:
         cli.main(["run", "--help"])
     assert exc_info.value.code == 0
+
+
+def test_main_jobs_help_exits_cleanly(capsys):
+    with pytest.raises(SystemExit) as exc_info:
+        cli.main(["jobs", "--help"])
+    assert exc_info.value.code == 0
+    help_text = capsys.readouterr().out
+    assert "--source" in help_text
+    assert "--thing-name" in help_text
 
 
 def test_reconcile_builds_an_identity_agnostic_health_check(monkeypatch, tmp_path):
