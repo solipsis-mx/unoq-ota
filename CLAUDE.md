@@ -27,7 +27,7 @@ unknown.
 | S3 source (`--source s3`) | Implemented; mints GET URLs at fetch time. Not yet hardware-proven |
 | systemd poller | Bench-proven: stock unit + drop-in, unattended coupled cycles, replay refusal |
 | Daily verify-only timer | `unoq-ota.timer` + `--once --no-flash`; sequence watermark skip |
-| AWS IoT Jobs poke | Shipped (`unoq-ota jobs`, `pip install 'unoq-ota[aws]'`); verify-only trigger for configured source |
+| AWS IoT Jobs poke | Shipped (`unoq-ota jobs`); MQTT `connect().result(timeout=30)` + `MQTT connected` log so a hung CRT future exits and systemd can restart |
 | Router-stop guard | Bench-proven after the irreversible-stop fix; dependents restored |
 | Boot reconciler | Implemented; mid-erase brick + **systemd** boot recovery proven |
 | Optional `host_payload` | **Hardware-proven 2026-09-05**: coupled apply, and rollback of host tree + MCU on a forced host-health failure |
@@ -36,7 +36,7 @@ unknown.
 | `AlwaysGate` | Only gate shipped. Do not add a product-specific gate here |
 | Agent self-update / rootfs / Zephyr core | Out of scope forever as currently designed |
 
-379 tests passing (`python3 -m pytest tests/ -q`).
+382 tests passing (`python3 -m pytest tests/ -q`).
 
 ## Commands
 
@@ -161,7 +161,9 @@ optional unit restart/is-active. Any failure rolls **host then MCU**. Omit
   an inflated one would defer forever without counting an attempt.
 - **`jobs` MQTT clientId defaults to `{thing}-ota`.** It must differ from the
   telemetry connection's id or AWS IoT will kick one client when the other
-  connects.
+  connects. `wait_mqtt_connected` bounds `connect().result` at 30s and logs
+  `MQTT connected`; a hang with no timeout used to leave the unit `active`
+  with no broker session.
 
 ## Where to continue
 

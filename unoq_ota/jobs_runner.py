@@ -16,6 +16,11 @@ from unoq_ota.jobs_doc import JobDocumentError, parse_job_operation
 
 log = logging.getLogger(__name__)
 
+# connect().result() with no timeout kept a jobs listener "active" with no
+# MQTT socket; systemd Restart=always never fired. Bound wait so a hung
+# connect exits and the unit can recycle.
+MQTT_CONNECT_TIMEOUT_S = 30.0
+
 
 class JobExecution(Protocol):
     job_id: str
@@ -157,6 +162,16 @@ def run_jobs_loop(client: JobsClient, run_cycle: Callable[[], object]) -> None:
             start_next()
 
 
+def wait_mqtt_connected(connection, timeout_s: float = MQTT_CONNECT_TIMEOUT_S) -> None:
+    """Block until the CRT MQTT future completes, or raise so systemd can restart."""
+    log.info("MQTT connecting (timeout %.0fs)", timeout_s)
+    try:
+        connection.connect().result(timeout=timeout_s)
+    except TimeoutError as exc:
+        raise TimeoutError(f"MQTT connect timed out after {timeout_s:.0f}s") from exc
+    log.info("MQTT connected")
+
+
 def build_aws_jobs_client(
     endpoint: str,
     cert_filepath: str,
@@ -184,7 +199,7 @@ def build_aws_jobs_client(
         clean_session=True,
         keep_alive_secs=30,
     )
-    connection.connect().result()
+    wait_mqtt_connected(connection)
     return AwsJobsClient(iotjobs.IotJobsClient(connection), thing_name, mqtt.QoS.AT_LEAST_ONCE)
 
 

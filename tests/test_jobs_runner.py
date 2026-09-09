@@ -1,3 +1,4 @@
+import logging
 from types import SimpleNamespace
 
 import pytest
@@ -7,6 +8,7 @@ from unoq_ota.jobs_runner import (
     default_mqtt_client_id,
     handle_execution,
     run_jobs_loop,
+    wait_mqtt_connected,
 )
 from unoq_ota.state import Phase
 
@@ -282,6 +284,51 @@ def test_wrap_run_cycle_resets_report_between_cycles():
     status2, detail2 = handle_execution({"operation": "check"}, run_cycle)
     assert status2 == "SUCCEEDED"
     assert detail2 == "up to date"
+
+
+def test_wait_mqtt_connected_passes_timeout_to_result():
+    seen = {}
+
+    class Fut:
+        def result(self, timeout=None):
+            seen["timeout"] = timeout
+            return None
+
+    class Conn:
+        def connect(self):
+            return Fut()
+
+    wait_mqtt_connected(Conn(), timeout_s=12.5)
+    assert seen["timeout"] == 12.5
+
+
+def test_wait_mqtt_connected_logs_when_the_future_completes(caplog):
+    caplog.set_level(logging.INFO)
+
+    class Fut:
+        def result(self, timeout=None):
+            return None
+
+    class Conn:
+        def connect(self):
+            return Fut()
+
+    wait_mqtt_connected(Conn(), timeout_s=1)
+    assert "MQTT connecting" in caplog.text
+    assert "MQTT connected" in caplog.text
+
+
+def test_wait_mqtt_connected_raises_timeout_error_when_result_times_out():
+    class Fut:
+        def result(self, timeout=None):
+            raise TimeoutError()
+
+    class Conn:
+        def connect(self):
+            return Fut()
+
+    with pytest.raises(TimeoutError, match="timed out after 5s"):
+        wait_mqtt_connected(Conn(), timeout_s=5)
 
 
 class _FakeFuture:
