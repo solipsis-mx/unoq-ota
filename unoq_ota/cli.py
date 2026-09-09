@@ -6,6 +6,7 @@ import argparse
 import json
 import logging
 import os
+import shlex
 import socket
 import subprocess
 import time
@@ -18,6 +19,7 @@ from unoq_ota.board import resolve_flash_target
 from unoq_ota.events import JOURNAL_NAME, EventLog
 from unoq_ota.flasher import read_partition
 from unoq_ota.gates.always import AlwaysGate
+from unoq_ota.gates.cellular_signal import CellularSignalGate
 from unoq_ota.health.version_report import VersionReportHealthCheck
 from unoq_ota.jobs_runner import (
     build_aws_jobs_client,
@@ -233,10 +235,20 @@ def _build_agent(args, source_parser: argparse.ArgumentParser) -> Agent:
     host_restart, host_health = _host_hooks(args)
     host_dir = getattr(args, "host_dir", None)
 
+    gate_name = getattr(args, "gate", None) or "always"
+    if gate_name == "cellular-signal":
+        cmd = getattr(args, "signal_cmd", None)
+        gate = CellularSignalGate(
+            min_quality=getattr(args, "min_signal_quality", 20),
+            signal_cmd=shlex.split(cmd) if cmd else None,
+        )
+    else:
+        gate = AlwaysGate()
+
     return Agent(
         state_dir=args.state_dir,
         source=source,
-        gate=AlwaysGate(),
+        gate=gate,
         health_factory=lambda version: VersionReportHealthCheck(expected_version=version),
         target=target,
         public_keys=public_keys,
@@ -424,6 +436,23 @@ def main(argv=None) -> int:
         "--host-unit",
         default=None,
         help="systemd unit to restart after applying host_payload, then require active",
+    )
+    source_parent.add_argument(
+        "--gate",
+        choices=("always", "cellular-signal"),
+        default=os.environ.get("UNOQ_OTA_GATE", "always"),
+        help="fetch/flash gate (also reads UNOQ_OTA_GATE)",
+    )
+    source_parent.add_argument(
+        "--min-signal-quality",
+        type=int,
+        default=int(os.environ.get("UNOQ_OTA_MIN_SIGNAL_QUALITY", "20")),
+        help="minimum ModemManager signal-quality percent when --gate cellular-signal",
+    )
+    source_parent.add_argument(
+        "--signal-cmd",
+        default=os.environ.get("UNOQ_OTA_SIGNAL_CMD"),
+        help="override mmcli probe (split with shlex; also reads UNOQ_OTA_SIGNAL_CMD)",
     )
 
     run = sub.add_parser(

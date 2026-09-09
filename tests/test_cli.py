@@ -214,6 +214,9 @@ def _run_args(tmp_path, **overrides):
         core_root=None,
         max_payload_bytes=None,
         no_flash=False,
+        gate="always",
+        min_signal_quality=20,
+        signal_cmd=None,
     )
     defaults.update(overrides)
     return argparse.Namespace(**defaults)
@@ -357,6 +360,73 @@ def test_run_passes_no_flash_to_agent(monkeypatch, tmp_path):
     args = _run_args(tmp_path, no_flash=True, once=True)
     assert cli._run(args, argparse.ArgumentParser()) == 0
     assert captured["no_flash"] is True
+
+
+def test_run_wires_always_gate_by_default(monkeypatch, tmp_path):
+    from unoq_ota.gates.always import AlwaysGate
+    captured = {}
+    _patch_agent(monkeypatch, captured)
+    monkeypatch.setattr(cli, "resolve_flash_target", _fake_target)
+    (tmp_path / "keys").mkdir()
+    args = _run_args(tmp_path)
+    assert cli._run(args, argparse.ArgumentParser()) == 0
+    assert isinstance(captured["gate"], AlwaysGate)
+
+
+def test_run_wires_cellular_signal_gate(monkeypatch, tmp_path):
+    from unoq_ota.gates.cellular_signal import CellularSignalGate
+    captured = {}
+    _patch_agent(monkeypatch, captured)
+    monkeypatch.setattr(cli, "resolve_flash_target", _fake_target)
+    (tmp_path / "keys").mkdir()
+    args = _run_args(tmp_path, gate="cellular-signal", min_signal_quality=20, signal_cmd=None)
+    assert cli._run(args, argparse.ArgumentParser()) == 0
+    assert isinstance(captured["gate"], CellularSignalGate)
+    assert captured["gate"].min_quality == 20
+
+
+def test_run_splits_signal_cmd_for_cellular_gate(monkeypatch, tmp_path):
+    from unoq_ota.gates.cellular_signal import CellularSignalGate
+    captured = {}
+    _patch_agent(monkeypatch, captured)
+    monkeypatch.setattr(cli, "resolve_flash_target", _fake_target)
+    (tmp_path / "keys").mkdir()
+    args = _run_args(
+        tmp_path,
+        gate="cellular-signal",
+        min_signal_quality=35,
+        signal_cmd="mmcli --modem 0 --output-keyvalue",
+    )
+    assert cli._run(args, argparse.ArgumentParser()) == 0
+    gate = captured["gate"]
+    assert isinstance(gate, CellularSignalGate)
+    assert gate.min_quality == 35
+    assert gate.signal_cmd == ["mmcli", "--modem", "0", "--output-keyvalue"]
+
+
+def test_jobs_wires_cellular_signal_gate(monkeypatch, tmp_path):
+    from unoq_ota.gates.cellular_signal import CellularSignalGate
+    captured = {}
+    monkeypatch.setattr(cli, "resolve_flash_target", _fake_target)
+    _patch_agent(monkeypatch, captured)
+    monkeypatch.setattr(cli, "build_aws_jobs_client", lambda **kwargs: object())
+    monkeypatch.setattr(cli, "run_jobs_loop", lambda client, run_cycle: None)
+    (tmp_path / "keys").mkdir()
+    args = _run_args(
+        tmp_path,
+        gate="cellular-signal",
+        min_signal_quality=20,
+        signal_cmd=None,
+        iot_endpoint="endpoint.example.invalid",
+        iot_cert=tmp_path / "cert.pem",
+        iot_key=tmp_path / "key.pem",
+        iot_ca=tmp_path / "ca.pem",
+        thing_name="board-1",
+        mqtt_client_id=None,
+    )
+    assert cli._jobs(args, argparse.ArgumentParser()) == 0
+    assert isinstance(captured["gate"], CellularSignalGate)
+    assert captured["gate"].min_quality == 20
 
 
 def test_jobs_forces_no_flash_and_starts_the_loop(monkeypatch, tmp_path):
@@ -539,6 +609,9 @@ def test_main_run_help_exits_cleanly(capsys):
     help_text = capsys.readouterr().out
     assert "s3" in help_text
     assert "--manifest-url" in help_text
+    assert "--gate" in help_text
+    assert "--min-signal-quality" in help_text
+    assert "--signal-cmd" in help_text
 
 
 def test_main_jobs_help_exits_cleanly(capsys):
@@ -548,6 +621,45 @@ def test_main_jobs_help_exits_cleanly(capsys):
     help_text = capsys.readouterr().out
     assert "--source" in help_text
     assert "--thing-name" in help_text
+    assert "--gate" in help_text
+    assert "--min-signal-quality" in help_text
+    assert "--signal-cmd" in help_text
+
+
+def test_run_gate_defaults_to_environment(monkeypatch, tmp_path):
+    from unoq_ota.gates.cellular_signal import CellularSignalGate
+
+    captured = {}
+    _patch_agent(monkeypatch, captured)
+    monkeypatch.setattr(cli, "resolve_flash_target", _fake_target)
+    monkeypatch.setenv("UNOQ_OTA_GATE", "cellular-signal")
+    monkeypatch.setenv("UNOQ_OTA_MIN_SIGNAL_QUALITY", "35")
+    monkeypatch.setenv("UNOQ_OTA_SIGNAL_CMD", "mmcli --modem 0 --output-keyvalue")
+    keys = tmp_path / "keys"
+    keys.mkdir()
+    src = tmp_path / "src"
+    src.mkdir()
+    assert (
+        cli.main(
+            [
+                "--state-dir",
+                str(tmp_path / "state"),
+                "run",
+                "--once",
+                "--source",
+                "local",
+                "--source-dir",
+                str(src),
+                "--keys-dir",
+                str(keys),
+            ]
+        )
+        == 0
+    )
+    gate = captured["gate"]
+    assert isinstance(gate, CellularSignalGate)
+    assert gate.min_quality == 35
+    assert gate.signal_cmd == ["mmcli", "--modem", "0", "--output-keyvalue"]
 
 
 def test_reconcile_builds_an_identity_agnostic_health_check(monkeypatch, tmp_path):
