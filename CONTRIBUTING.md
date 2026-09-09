@@ -45,8 +45,9 @@ it.
 4. No names of internal products, fleets, vehicles, or organisations in
    code, tests, or comments. Generic language only.
 5. Customisation belongs behind `UpdateSource`, `Gate`, and `HealthCheck`.
-   Do not add a product-specific gate here. `AlwaysGate` is the only gate
-   this repo ships.
+   Do not add a product-specific gate here. Product voltage/ignition policy
+   stays out of this repo. `AlwaysGate` and `CellularSignalGate` (ModemManager
+   + default-route probe) are the generic gates this repo ships.
 6. Fill in the pull-request template. Say how you tested.
 
 Cursor and Claude are co-collaborators on this project (see

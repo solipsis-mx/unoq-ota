@@ -207,20 +207,26 @@ Optional extra (`pip install unoq-ota[aws]`):
 
 ```python
 class Gate(Protocol):
+    def may_fetch(self) -> tuple[bool, str]: ...   # (allowed, reason)
     def may_flash(self) -> tuple[bool, str]: ...   # (allowed, reason)
 ```
 
-Shipped: `AlwaysGate`. Everything else is deployment-specific and belongs in
-your own code — the interface exists precisely so you don't have to fork this
-repo to add one.
+Shipped: `AlwaysGate` and optional `CellularSignalGate` (`--gate
+cellular-signal`). Everything else is deployment-specific and belongs in your
+own code — the interface exists precisely so you don't have to fork this repo
+to add one.
 
 If your device is battery-powered or vehicle-mounted, **write a gate**. The
 useful predicate is usually "supply voltage stable and expected to stay that
 way for a minute," which is not the same as "idle." A device that looks idle
 may be about to experience an engine crank.
 
-The agent downloads, verifies, and stages regardless of the gate; only the
-flash step blocks. A device can sit staged indefinitely.
+`may_fetch` (optional on older gates) runs after the watermark skip and
+preflight and before the artifact GET. `may_flash` still runs only after
+staging. `AlwaysGate` allows both. `CellularSignalGate` refuses fetch
+when the default route is a cellular netdev (`cdc_ether` and friends) and
+ModemManager `signal-quality` is below `--min-signal-quality` (default 20),
+or the probe fails. It does not implement a product voltage/ignition policy.
 
 ### `HealthCheck` — did the new firmware actually come up
 

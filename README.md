@@ -80,7 +80,7 @@ unoq_ota/
   state.py        crash-safe persistence
   host.py         optional host-tree swap + rollback
   sources/        local, http_manifest, s3_presigned
-  gates/          always  (write your own)
+  gates/          always, cellular_signal  (write your own)
   health/         version_report
 tools/            keygen, sign-artifact
 systemd/          unit files

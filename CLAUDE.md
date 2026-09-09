@@ -33,7 +33,7 @@ unknown.
 | Optional `host_payload` | **Hardware-proven 2026-09-05**: coupled apply, and rollback of host tree + MCU on a forced host-health failure |
 | Core-root override | `--core-root` / `UNOQ_OTA_CORE_ROOT`; bench-proven with `HOME=/root` |
 | Journal + `--report-url` | Implemented; `committed`, `rolled_back` and `rejected` POSTs all bench-proven |
-| `AlwaysGate` | Only gate shipped. Do not add a product-specific gate here |
+| `AlwaysGate` / `CellularSignalGate` | Shipped gates (`--gate always` default; `cellular-signal` for MM+route fetch gating). Do not add a product-specific gate here |
 | Agent self-update / rootfs / Zephyr core | Out of scope forever as currently designed |
 
 385 tests passing (`python3 -m pytest tests/ -q`).
