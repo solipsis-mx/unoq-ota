@@ -441,6 +441,37 @@ def test_jobs_refuses_mqtt_client_id_equal_to_thing_name(monkeypatch, tmp_path):
     assert "connected" not in seen
 
 
+def test_jobs_returns_1_when_clock_preflight_fails(monkeypatch, tmp_path):
+    from unoq_ota.preflight import PreflightError
+
+    monkeypatch.setattr(cli, "resolve_flash_target", _fake_target)
+    _patch_agent(monkeypatch, {})
+
+    def boom(**kwargs):
+        raise PreflightError(
+            "system clock reads 1970-01-01T00:00:00+00:00, which is implausible; "
+            "deferring until time is synchronised"
+        )
+
+    monkeypatch.setattr(cli, "build_aws_jobs_client", boom)
+    looped = []
+    monkeypatch.setattr(
+        cli, "run_jobs_loop", lambda client, run_cycle: looped.append(True)
+    )
+    (tmp_path / "keys").mkdir()
+    args = _run_args(
+        tmp_path,
+        iot_endpoint="endpoint.example.invalid",
+        iot_cert=tmp_path / "cert.pem",
+        iot_key=tmp_path / "key.pem",
+        iot_ca=tmp_path / "ca.pem",
+        thing_name="board-1",
+        mqtt_client_id=None,
+    )
+    assert cli._jobs(args, argparse.ArgumentParser()) == 1
+    assert looped == []
+
+
 def test_run_once_runs_a_single_cycle_and_returns_without_sleeping(monkeypatch, tmp_path):
     calls = {"run_once": 0, "sleep": 0}
     monkeypatch.setattr(cli, "resolve_flash_target", _fake_target)

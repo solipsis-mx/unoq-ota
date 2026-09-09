@@ -27,7 +27,7 @@ from unoq_ota.jobs_runner import (
     wrap_run_cycle,
 )
 from unoq_ota.keyring import load_keyring
-from unoq_ota.preflight import MAX_PAYLOAD_BYTES
+from unoq_ota.preflight import MAX_PAYLOAD_BYTES, PreflightError
 from unoq_ota.reconciler import reconcile
 from unoq_ota.sources.http_manifest import HttpManifestSource, download
 from unoq_ota.sources.local import LocalFileSource
@@ -285,14 +285,18 @@ def _jobs(args, jobs_parser: argparse.ArgumentParser) -> int:
     except ValueError as exc:
         jobs_parser.error(str(exc))
     agent = _build_agent(args, jobs_parser)
-    client = build_aws_jobs_client(
-        endpoint=args.iot_endpoint,
-        cert_filepath=str(args.iot_cert),
-        pri_key_filepath=str(args.iot_key),
-        ca_filepath=str(args.iot_ca),
-        thing_name=thing_name,
-        client_id=client_id,
-    )
+    try:
+        client = build_aws_jobs_client(
+            endpoint=args.iot_endpoint,
+            cert_filepath=str(args.iot_cert),
+            pri_key_filepath=str(args.iot_key),
+            ca_filepath=str(args.iot_ca),
+            thing_name=thing_name,
+            client_id=client_id,
+        )
+    except PreflightError as exc:
+        log.warning("%s", exc)
+        return 1
     run_jobs_loop(client, wrap_run_cycle(agent.run_once, agent.source))
     return 0
 

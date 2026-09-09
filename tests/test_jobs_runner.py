@@ -9,6 +9,7 @@ from unoq_ota.jobs_runner import (
     handle_execution,
     run_jobs_loop,
     wait_mqtt_connected,
+    ensure_plausible_clock,
 )
 from unoq_ota.state import Phase
 
@@ -329,6 +330,21 @@ def test_wait_mqtt_connected_raises_timeout_error_when_result_times_out():
 
     with pytest.raises(TimeoutError, match="timed out after 5s"):
         wait_mqtt_connected(Conn(), timeout_s=5)
+
+
+def test_ensure_plausible_clock_rejects_epoch():
+    from datetime import datetime, timezone
+
+    from unoq_ota.preflight import PreflightError
+
+    with pytest.raises(PreflightError, match="implausible"):
+        ensure_plausible_clock(now=datetime(1970, 1, 1, tzinfo=timezone.utc))
+
+
+def test_ensure_plausible_clock_accepts_2026():
+    from datetime import datetime, timezone
+
+    ensure_plausible_clock(now=datetime(2026, 9, 9, tzinfo=timezone.utc))
 
 
 class _FakeFuture:

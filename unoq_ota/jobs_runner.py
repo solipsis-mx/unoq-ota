@@ -22,6 +22,17 @@ log = logging.getLogger(__name__)
 MQTT_CONNECT_TIMEOUT_S = 30.0
 
 
+def ensure_plausible_clock(now=None) -> None:
+    """Refuse Jobs MQTT when the clock cannot validate TLS or signatures.
+
+    Raises PreflightError so systemd Restart=always can retry after NTP
+    or last-known-time persist. No sleep loop — the unit recycles.
+    """
+    from unoq_ota.preflight import check_clock
+
+    check_clock(now=now)
+
+
 class JobExecution(Protocol):
     job_id: str
     document: object
@@ -182,6 +193,7 @@ def build_aws_jobs_client(
 ):
     """Construct the awsiotsdk Jobs client. Imported only at call time."""
     require_distinct_mqtt_client_id(thing_name, client_id)
+    ensure_plausible_clock()
     try:
         from awscrt import mqtt
         from awsiot import iotjobs, mqtt_connection_builder
