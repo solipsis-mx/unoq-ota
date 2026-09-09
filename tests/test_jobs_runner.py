@@ -1,5 +1,7 @@
 from types import SimpleNamespace
 
+import pytest
+
 from unoq_ota.interfaces import Status
 from unoq_ota.jobs_runner import (
     default_mqtt_client_id,
@@ -14,6 +16,7 @@ def test_check_job_runs_one_cycle():
     status, detail = handle_execution({"operation": "check"}, lambda: calls.append("ran") or "idle")
     assert calls == ["ran"]
     assert status == "SUCCEEDED"
+    assert detail == "up to date"
 
 
 def test_unknown_operation_does_not_run_cycle():
@@ -55,7 +58,7 @@ def test_run_jobs_loop_handles_each_execution_then_stops():
     assert calls == ["ran"]
     assert updates[0][0] == "j1"
     assert updates[0][1] == "IN_PROGRESS"
-    assert updates[1] == ("j1", "SUCCEEDED", "idle")
+    assert updates[1] == ("j1", "SUCCEEDED", "up to date")
     assert updates[2][0] == "j2"
     assert updates[2][1] == "IN_PROGRESS"
     assert updates[3][0] == "j2"
@@ -66,6 +69,19 @@ def test_run_jobs_loop_handles_each_execution_then_stops():
 def test_default_mqtt_client_id_is_thing_dash_ota():
     assert default_mqtt_client_id("board-1") == "board-1-ota"
     assert default_mqtt_client_id("board-1") != "board-1"
+
+
+def test_refuses_mqtt_client_id_equal_to_thing_name():
+    from unoq_ota.jobs_runner import require_distinct_mqtt_client_id
+
+    with pytest.raises(ValueError, match="must not equal"):
+        require_distinct_mqtt_client_id("board-1", "board-1")
+
+
+def test_accepts_mqtt_client_id_with_ota_suffix():
+    from unoq_ota.jobs_runner import require_distinct_mqtt_client_id
+
+    assert require_distinct_mqtt_client_id("board-1", "board-1-ota") == "board-1-ota"
 
 
 def test_jobs_runner_does_not_import_awsiotsdk():
@@ -189,7 +205,7 @@ def test_idle_after_rejected_status_fails_the_job():
     assert "download failed" in detail
 
 
-def test_verified_status_succeeds():
+def test_verified_status_succeeds_with_report_detail():
     result = SimpleNamespace(
         value="idle",
         reported_status=Status.VERIFIED,
@@ -197,6 +213,29 @@ def test_verified_status_succeeds():
     )
     status, detail = handle_execution({"operation": "check"}, lambda: result)
     assert status == "SUCCEEDED"
+    assert detail == "verified, not applied"
+
+
+def test_waiting_for_gate_fails_the_job():
+    result = SimpleNamespace(
+        value="idle",
+        reported_status=Status.WAITING_FOR_GATE,
+        detail="clock unset",
+    )
+    status, detail = handle_execution({"operation": "check"}, lambda: result)
+    assert status == "FAILED"
+    assert "clock unset" in detail
+
+
+def test_gate_closed_fails_the_job():
+    result = SimpleNamespace(
+        value="staged",
+        reported_status=Status.WAITING_FOR_GATE,
+        detail="supply unstable",
+    )
+    status, detail = handle_execution({"operation": "check"}, lambda: result)
+    assert status == "FAILED"
+    assert "supply unstable" in detail
 
 
 def test_wrap_run_cycle_maps_rejected_report_to_failed_job():
@@ -242,7 +281,7 @@ def test_wrap_run_cycle_resets_report_between_cycles():
 
     status2, detail2 = handle_execution({"operation": "check"}, run_cycle)
     assert status2 == "SUCCEEDED"
-    assert detail2 == "idle"
+    assert detail2 == "up to date"
 
 
 class _FakeFuture:

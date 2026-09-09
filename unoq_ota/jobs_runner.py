@@ -46,6 +46,16 @@ def default_mqtt_client_id(thing_name: str) -> str:
     return f"{thing_name}-ota"
 
 
+def require_distinct_mqtt_client_id(thing_name: str, client_id: str) -> str:
+    """Refuse a clientId that would knock the telemetry connection off the broker."""
+    if client_id == thing_name:
+        raise ValueError(
+            f"mqtt client_id {client_id!r} must not equal the thing name "
+            "(that id is already used by telemetry; a second connection would evict it)"
+        )
+    return client_id
+
+
 def adapt_execution(raw) -> Optional[SimpleNamespace]:
     """Normalize SDK (`job_document`) and protocol (`document`) executions."""
     if raw is None:
@@ -64,10 +74,10 @@ def adapt_execution(raw) -> Optional[SimpleNamespace]:
 
 
 def wrap_run_cycle(run_once: Callable[[], object], source) -> Callable[[], object]:
-    """Capture the last `source.report` so Jobs can map REJECTED → FAILED.
+    """Capture the last `source.report` so Jobs can map status and detail.
 
     `Agent.run_once` often returns `Phase.IDLE` after reporting
-    `Status.REJECTED` on download/verify failure. The wrapper does not
+    `Status.REJECTED` or `Status.VERIFIED`. The wrapper does not
     change flash or commit paths.
     """
     last = {"status": None, "detail": ""}
@@ -102,11 +112,20 @@ def _status_from_cycle(result) -> tuple[str, str]:
     phase = _enum_value(getattr(result, "value", result))
     reported = _enum_value(getattr(result, "reported_status", None))
     extra = getattr(result, "detail", None)
+    extra_s = str(extra) if extra else ""
     if phase == "rejected" or reported == "rejected":
-        if extra:
-            return "FAILED", str(extra)
+        if extra_s:
+            return "FAILED", extra_s
         return "FAILED", "" if phase is None else str(phase)
-    return "SUCCEEDED", "" if phase is None else str(phase)
+    if reported == "waiting_for_gate":
+        return "FAILED", extra_s or str(reported)
+    if reported == "verified":
+        return "SUCCEEDED", extra_s or "verified, not applied"
+    if reported == "committed":
+        return "SUCCEEDED", extra_s or str(phase)
+    if reported in (None, "") and phase in (None, "idle"):
+        return "SUCCEEDED", extra_s or "up to date"
+    return "FAILED", extra_s or ("" if phase is None else str(phase))
 
 
 def handle_execution(document, run_cycle: Callable[[], object]) -> tuple[str, str]:
@@ -147,6 +166,7 @@ def build_aws_jobs_client(
     client_id: str,
 ):
     """Construct the awsiotsdk Jobs client. Imported only at call time."""
+    require_distinct_mqtt_client_id(thing_name, client_id)
     try:
         from awscrt import mqtt
         from awsiot import iotjobs, mqtt_connection_builder

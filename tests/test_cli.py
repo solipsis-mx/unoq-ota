@@ -392,6 +392,55 @@ def test_jobs_forces_no_flash_and_starts_the_loop(monkeypatch, tmp_path):
     assert seen["client_kwargs"]["thing_name"] == "board-1"
 
 
+def test_jobs_forces_zero_jitter(monkeypatch, tmp_path):
+    captured = {}
+    monkeypatch.setattr(cli, "resolve_flash_target", _fake_target)
+    _patch_agent(monkeypatch, captured)
+    monkeypatch.setattr(cli, "build_aws_jobs_client", lambda **kwargs: object())
+    monkeypatch.setattr(cli, "run_jobs_loop", lambda client, run_cycle: None)
+    (tmp_path / "keys").mkdir()
+    args = _run_args(
+        tmp_path,
+        source="http",
+        source_dir=None,
+        manifest_url="http://example.invalid/manifest.json",
+        jitter=30.0,
+        iot_endpoint="endpoint.example.invalid",
+        iot_cert=tmp_path / "cert.pem",
+        iot_key=tmp_path / "key.pem",
+        iot_ca=tmp_path / "ca.pem",
+        thing_name="board-1",
+        mqtt_client_id=None,
+    )
+    assert cli._jobs(args, argparse.ArgumentParser()) == 0
+    assert captured["source"]._inner.jitter_s == 0
+
+
+def test_jobs_refuses_mqtt_client_id_equal_to_thing_name(monkeypatch, tmp_path):
+    seen = {}
+    monkeypatch.setattr(cli, "resolve_flash_target", _fake_target)
+    _patch_agent(monkeypatch, seen)
+    monkeypatch.setattr(
+        cli,
+        "build_aws_jobs_client",
+        lambda **kwargs: seen.setdefault("connected", True),
+    )
+    monkeypatch.setattr(cli, "run_jobs_loop", lambda client, run_cycle: None)
+    (tmp_path / "keys").mkdir()
+    args = _run_args(
+        tmp_path,
+        iot_endpoint="endpoint.example.invalid",
+        iot_cert=tmp_path / "cert.pem",
+        iot_key=tmp_path / "key.pem",
+        iot_ca=tmp_path / "ca.pem",
+        thing_name="board-1",
+        mqtt_client_id="board-1",
+    )
+    with pytest.raises(SystemExit):
+        cli._jobs(args, argparse.ArgumentParser())
+    assert "connected" not in seen
+
+
 def test_run_once_runs_a_single_cycle_and_returns_without_sleeping(monkeypatch, tmp_path):
     calls = {"run_once": 0, "sleep": 0}
     monkeypatch.setattr(cli, "resolve_flash_target", _fake_target)

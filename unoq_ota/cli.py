@@ -22,6 +22,7 @@ from unoq_ota.health.version_report import VersionReportHealthCheck
 from unoq_ota.jobs_runner import (
     build_aws_jobs_client,
     default_mqtt_client_id,
+    require_distinct_mqtt_client_id,
     run_jobs_loop,
     wrap_run_cycle,
 )
@@ -275,9 +276,15 @@ def _jobs(args, jobs_parser: argparse.ArgumentParser) -> int:
         jobs_parser.error("jobs requires " + ", ".join(missing))
 
     args.no_flash = True
-    agent = _build_agent(args, jobs_parser)
+    args.jitter = 0
     thing_name = args.thing_name
-    client_id = args.mqtt_client_id or default_mqtt_client_id(thing_name)
+    try:
+        client_id = require_distinct_mqtt_client_id(
+            thing_name, args.mqtt_client_id or default_mqtt_client_id(thing_name)
+        )
+    except ValueError as exc:
+        jobs_parser.error(str(exc))
+    agent = _build_agent(args, jobs_parser)
     client = build_aws_jobs_client(
         endpoint=args.iot_endpoint,
         cert_filepath=str(args.iot_cert),
