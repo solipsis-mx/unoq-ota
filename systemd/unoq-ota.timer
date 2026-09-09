@@ -1,0 +1,12 @@
+[Unit]
+Description=unoq-ota daily manifest check
+
+[Timer]
+OnCalendar=*-*-* 03:00:00
+Timezone=America/Mexico_City
+Persistent=true
+RandomizedDelaySec=900
+Unit=unoq-ota.service
+
+[Install]
+WantedBy=timers.target

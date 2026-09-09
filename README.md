@@ -21,8 +21,10 @@ do it while the board sits somewhere inconvenient. That's this project.
 
 ## What it does
 
-- Fetches a signed manifest over HTTP (or from a local directory). The same
-  pull works on Wi-Fi or any other Linux IP bearer.
+- Fetches a signed manifest over HTTP, from a local directory, or from S3
+  (`--source s3`, `s3://bucket/key`). The S3 source mints a short-lived GET
+  URL at fetch time so a unit file never holds an expiring presigned URL.
+  The same pull works on Wi-Fi or any other Linux IP bearer.
 - Verifies signature, digest, board compatibility, and the sketch header
   **before** the MCU is touched at all.
 - Flashes only the sketch partition, locally over SWD — the network is never in
@@ -77,7 +79,7 @@ unoq_ota/
   verify.py       signature, digest, sequence
   state.py        crash-safe persistence
   host.py         optional host-tree swap + rollback
-  sources/        local, http_manifest
+  sources/        local, http_manifest, s3_presigned
   gates/          always  (write your own)
   health/         version_report
 tools/            keygen, sign-artifact
@@ -104,10 +106,13 @@ On a development machine, or on the board:
 ```bash
 python3 -m venv .venv
 .venv/bin/pip install -e '.[dev]'   # drop [dev] on a device
+# S3 source (optional):  .venv/bin/pip install -e '.[s3]'
 ```
 
 That provides the `unoq-ota` console script. A device install typically
-symlinks it to `/usr/local/bin/unoq-ota`.
+symlinks it to `/usr/local/bin/unoq-ota`. Copy `systemd/unoq-ota.service`
+and `systemd/unoq-ota.timer` onto the board for a daily verify-only
+check; see [systemd](#systemd).
 
 ## Sketch contract
 
@@ -168,14 +173,15 @@ manifest and the update is MCU-only.
 
 ## systemd
 
-Two units ship in [`systemd/`](systemd/):
+Units and a timer ship in [`systemd/`](systemd/):
 
 - `unoq-ota-reconcile.service` — oneshot at boot. Enable it. It does not
   need extra flags beyond `UNOQ_OTA_CORE_ROOT` if the core is not under
   `HOME`.
 - `unoq-ota.service` — the poller. The stock `ExecStart=/usr/local/bin/unoq-ota run`
   is incomplete on purpose: `--source`, `--keys-dir`, and `--manifest-url`
-  (or `--source-dir`) have no site-wide default. Add a drop-in:
+  (or `--source-dir`) have no site-wide default. Stock `Restart=always`
+  stays for benches. Add a drop-in:
 
 ```bash
 sudo systemctl edit unoq-ota.service
@@ -188,6 +194,42 @@ ExecStart=/usr/local/bin/unoq-ota run --source http \
   --manifest-url https://example.com/manifest.json \
   --keys-dir /etc/unoq-ota/keys
 ```
+
+For a private S3 bucket, install the extra (`pip install 'unoq-ota[s3]'`)
+and point at the object identity. Credentials come from the standard AWS
+chain (`AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY`, a shared config file,
+or an instance role) — never from a URL in the unit file:
+
+```ini
+[Service]
+ExecStart=
+ExecStart=/usr/local/bin/unoq-ota run --source s3 \
+  --manifest-url s3://my-bucket/manifest.json \
+  --keys-dir /etc/unoq-ota/keys
+```
+
+Sign the manifest with `--url s3://my-bucket/artifact.bin` (and
+`--host-url s3://...` when there is a host payload) so artifact fetches
+mint URLs the same way. A leftover https presigned URL in `--manifest-url`
+is rejected at startup.
+
+- `unoq-ota.timer` — daily check at 03:00 America/Mexico_City
+  (`Persistent=true`, `RandomizedDelaySec=900`). Enable the timer, not a
+  long-running poller, when you want one verify-only pass a day. Pair it
+  with a drop-in that sets `Type=oneshot`, clears `Restart=`, and runs
+  `--once --no-flash`:
+
+```ini
+[Service]
+Type=oneshot
+Restart=
+ExecStart=
+ExecStart=/usr/local/bin/unoq-ota run --source s3 --once --no-flash \
+  --manifest-url s3://bucket/manifest.json \
+  --keys-dir /etc/unoq-ota/keys
+```
+
+systemd without `Timezone=` should use `OnCalendar=*-*-* 09:00:00 UTC`.
 
 Optional environment in `/etc/unoq-ota/agent.env` (both units already
 read it): `UNOQ_OTA_REPORT_URL`, `UNOQ_OTA_DEVICE_ID`, `UNOQ_OTA_CORE_ROOT`.

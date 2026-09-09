@@ -27,3 +27,18 @@ def test_units_document_the_core_root_override():
     for name in ("unoq-ota-reconcile.service", "unoq-ota.service"):
         text = (ROOT / "systemd" / name).read_text()
         assert "UNOQ_OTA_CORE_ROOT" in text, name
+
+
+def test_timer_fires_daily_at_three_am_mexico_city():
+    text = (ROOT / "systemd" / "unoq-ota.timer").read_text()
+    assert "OnCalendar=*-*-* 03:00:00" in text
+    assert "Timezone=America/Mexico_City" in text
+    assert "Persistent=true" in text
+    assert "RandomizedDelaySec=900" in text
+    assert "Unit=unoq-ota.service" in text
+
+
+def test_agent_unit_documents_once_no_flash_oneshot():
+    text = (ROOT / "systemd" / "unoq-ota.service").read_text()
+    assert "--once" in text
+    assert "--no-flash" in text

@@ -13,6 +13,9 @@ Type=simple
 #   [Service]
 #   ExecStart=
 #   ExecStart=/usr/local/bin/unoq-ota run --source http --manifest-url https://example.invalid/manifest.json --keys-dir /etc/unoq-ota/keys
+# or, to mint S3 GET URLs at fetch time instead of baking a presigned URL:
+#   ExecStart=/usr/local/bin/unoq-ota run --source s3 --manifest-url s3://bucket/manifest.json --keys-dir /etc/unoq-ota/keys
+# (requires pip install 'unoq-ota[s3]' and the standard AWS credential chain).
 # Optional: UNOQ_OTA_REPORT_URL and UNOQ_OTA_DEVICE_ID in
 # /etc/unoq-ota/agent.env so every status POST includes a stable identity.
 # Also optional there: UNOQ_OTA_CORE_ROOT, the Arduino installation holding
@@ -20,6 +23,17 @@ Type=simple
 # directory that owns one). Without it the core is looked up under HOME,
 # which for User=root is /root -- not where a core is normally installed.
 # `--core-root PATH` on the drop-in's ExecStart does the same thing.
+# Daily verify-only (pair with systemd/unoq-ota.timer). The stock
+# Type=simple / Restart=always unit stays for benches that want a
+# long-running poller. For a oneshot daily check, drop in:
+#   systemctl edit unoq-ota.service
+#   [Service]
+#   Type=oneshot
+#   Restart=
+#   ExecStart=
+#   ExecStart=/usr/local/bin/unoq-ota run --source s3 --once --no-flash --manifest-url s3://bucket/manifest.json --keys-dir /etc/unoq-ota/keys
+# systemd without Timezone= should use OnCalendar=*-*-* 09:00:00 UTC
+# (03:00 America/Mexico_City).
 EnvironmentFile=-/etc/unoq-ota/agent.env
 ExecStart=/usr/local/bin/unoq-ota run
 Restart=always
