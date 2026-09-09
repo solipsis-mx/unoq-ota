@@ -36,7 +36,7 @@ unknown.
 | `AlwaysGate` | Only gate shipped. Do not add a product-specific gate here |
 | Agent self-update / rootfs / Zephyr core | Out of scope forever as currently designed |
 
-370 tests passing (`python3 -m pytest tests/ -q`).
+379 tests passing (`python3 -m pytest tests/ -q`).
 
 ## Commands
 

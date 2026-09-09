@@ -316,10 +316,12 @@ only when `update.sequence` is strictly newer than that watermark. When the
 sequence is not newer, artifact work is skipped — the manifest fetch already
 happened.
 
-On a successful verify-only pass the agent reports `VERIFIED`, stamps
-`last_verified_sequence` and `last_verified_version`, deletes `staged.bin`
-and `staged-host.tar.gz`, and does **not** bump `state.sequence` or
-`committed_version`.
+On a successful verify-only pass the agent unlinks `staged.bin` and
+`staged-host.tar.gz` **before** stamping `last_verified_sequence` and
+`last_verified_version`, reports `VERIFIED`, and does **not** bump
+`state.sequence` or `committed_version`. The skip path (sequence not newer
+than the watermark) also unlinks leftover staged files so a crash cannot
+leave reconciler bait, and reports `up to date`.
 
 ### On-disk state
 

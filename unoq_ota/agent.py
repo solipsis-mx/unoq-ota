@@ -65,6 +65,7 @@ HEALTH_TIMEOUT_S = 30.0
 # guarantee; this loop exists so a bad flash can often be corrected without
 # waiting for a reboot.
 ROLLBACK_CANDIDATES = ("current.bin", "previous.bin", "golden.bin")
+STAGED_NAMES = ("staged.bin", "staged-host.tar.gz")
 
 
 class Agent:
@@ -275,6 +276,11 @@ class Agent:
                 log.warning("host rollback failed: %s", rollback_exc)
             return False
 
+    def _unlink_staged(self) -> None:
+        """Drop leftover staged files so they cannot bait the reconciler."""
+        for name in STAGED_NAMES:
+            (self.state_dir / name).unlink(missing_ok=True)
+
     def run_once(self) -> Phase:
         update = self.source.check()
         if update is None:
@@ -305,6 +311,8 @@ class Agent:
                 update.sequence,
                 watermark,
             )
+            self._unlink_staged()
+            self.source.report(update, Status.VERIFIED, "up to date")
             return Phase.IDLE
 
         self.state_dir.mkdir(parents=True, exist_ok=True)
@@ -438,12 +446,11 @@ class Agent:
             return Phase.IDLE
 
         if self.no_flash:
+            self._unlink_staged()
             state = self.store.load()
             state.last_verified_sequence = update.sequence
             state.last_verified_version = update.version
             self.store.save(state)
-            staged.unlink(missing_ok=True)
-            (self.state_dir / "staged-host.tar.gz").unlink(missing_ok=True)
             self.source.report(update, Status.VERIFIED, "verified, not applied")
             self._set(Phase.IDLE, clear_version=True)
             return Phase.IDLE

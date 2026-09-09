@@ -644,6 +644,66 @@ def test_no_flash_verifies_without_flashing_and_stamps_watermark(tmp_path):
     assert any(status == Status.VERIFIED for status, _ in source.reports)
 
 
+def test_no_flash_unlinks_staged_before_persisting_watermark(tmp_path, monkeypatch):
+    seen = {}
+    original_save = StateStore.save
+
+    def save(self, state):
+        if state.last_verified_sequence == 2 and "staged_exists" not in seen:
+            seen["staged_exists"] = (tmp_path / "staged.bin").exists()
+            seen["host_exists"] = (tmp_path / "staged-host.tar.gz").exists()
+        return original_save(self, state)
+
+    monkeypatch.setattr(StateStore, "save", save)
+
+    def fetch(url, dest):
+        Path(dest).parent.mkdir(parents=True, exist_ok=True)
+        Path(dest).write_bytes(_host_bytes() if "host" in url else make_artifact_bytes())
+
+    source = StubSource(_coupled_update())
+    agent = Agent(
+        state_dir=tmp_path,
+        source=source,
+        gate=StubGate(),
+        health_factory=lambda version: StubHealth([]),
+        target=TARGET,
+        flash=lambda artifact, target: None,
+        fetch=fetch,
+        verify=lambda manifest, path, last_sequence: None,
+        router_stopped=_fake_router_stopped,
+        no_flash=True,
+    )
+
+    assert agent.run_once() == Phase.IDLE
+    assert seen["staged_exists"] is False
+    assert seen["host_exists"] is False
+    assert not (tmp_path / "staged.bin").exists()
+    assert not (tmp_path / "staged-host.tar.gz").exists()
+
+
+def test_skip_path_unlinks_leftover_staged_files_and_reports_up_to_date(tmp_path):
+    store = StateStore(tmp_path / "state.json")
+    store.save(State(last_verified_sequence=11, last_verified_version="probe"))
+    (tmp_path / "staged.bin").write_bytes(b"leftover")
+    (tmp_path / "staged-host.tar.gz").write_bytes(b"leftover-host")
+    fetch_calls = []
+
+    def fetch(url, dest):
+        fetch_calls.append(url)
+
+    source = StubSource(_update(version="probe", sequence=11))
+    agent = _agent(tmp_path, source, StubGate(), StubHealth([]))
+    agent._fetch = fetch
+
+    result = agent.run_once()
+
+    assert result == Phase.IDLE
+    assert fetch_calls == []
+    assert not (tmp_path / "staged.bin").exists()
+    assert not (tmp_path / "staged-host.tar.gz").exists()
+    assert source.reports == [(Status.VERIFIED, "up to date")]
+
+
 def test_a_poisoned_version_is_rejected_without_downloading(tmp_path):
     """I2: is_poisoned had no production caller anywhere -- a poisoned
     version must be rejected before the network is touched.
