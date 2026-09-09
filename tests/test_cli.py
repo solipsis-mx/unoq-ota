@@ -171,6 +171,7 @@ def _patch_agent(monkeypatch, captured, run_once=lambda: Phase.IDLE):
     class FakeAgent:
         def __init__(self, **kwargs):
             captured.update(kwargs)
+            self.source = kwargs.get("source")
 
         def run_once(self):
             return run_once()
@@ -295,7 +296,8 @@ def test_jobs_forces_no_flash_and_starts_the_loop(monkeypatch, tmp_path):
     )
     assert cli._jobs(args, argparse.ArgumentParser()) == 0
     assert captured["no_flash"] is True
-    assert seen["cycled"] == Phase.IDLE
+    outcome = seen["cycled"]
+    assert getattr(outcome, "phase", outcome) == Phase.IDLE
     assert seen["client_kwargs"]["client_id"] == "board-1-ota"
     assert seen["client_kwargs"]["thing_name"] == "board-1"
 

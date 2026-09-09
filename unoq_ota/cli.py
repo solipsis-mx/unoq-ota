@@ -23,6 +23,7 @@ from unoq_ota.jobs_runner import (
     build_aws_jobs_client,
     default_mqtt_client_id,
     run_jobs_loop,
+    wrap_run_cycle,
 )
 from unoq_ota.keyring import load_keyring
 from unoq_ota.preflight import MAX_PAYLOAD_BYTES
@@ -250,7 +251,7 @@ def _jobs(args, jobs_parser: argparse.ArgumentParser) -> int:
         thing_name=thing_name,
         client_id=client_id,
     )
-    run_jobs_loop(client, agent.run_once)
+    run_jobs_loop(client, wrap_run_cycle(agent.run_once, agent.source))
     return 0
 
 
