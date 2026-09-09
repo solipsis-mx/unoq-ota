@@ -259,10 +259,10 @@ def test_load_treats_an_absent_file_as_a_fresh_device(tmp_path):
 
 def test_round_trips_last_verified_watermark(tmp_path):
     store = StateStore(tmp_path / "state.json")
-    store.save(State(last_verified_sequence=11, last_verified_version="probe-solipsis-1"))
+    store.save(State(last_verified_sequence=11, last_verified_version="probe-1"))
     reloaded = store.load()
     assert reloaded.last_verified_sequence == 11
-    assert reloaded.last_verified_version == "probe-solipsis-1"
+    assert reloaded.last_verified_version == "probe-1"
     assert reloaded.sequence == 0
     assert reloaded.committed_version is None
 
