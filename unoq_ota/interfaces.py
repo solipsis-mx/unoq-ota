@@ -62,8 +62,12 @@ class UpdateSource(Protocol):
 class Gate(Protocol):
     """Whether the device may be interrupted right now.
 
-    Staging and verification ignore the gate; only the flash step blocks, so a
-    device may sit ready-to-flash indefinitely.
+    Artifact GET is gated by `may_fetch`; `may_flash` still only blocks
+    OpenOCD. The agent uses getattr for `may_fetch`, so a gate that only
+    implements `may_flash` is treated as allow on fetch.
+
+    Staging and verification ignore `may_flash`; only the flash step blocks,
+    so a device may sit ready-to-flash indefinitely.
 
     The flash erases before it programs, and a reset inside that window leaves
     the MCU running nothing until the reconciler recovers it. For anything
@@ -71,6 +75,10 @@ class Gate(Protocol):
     stable and expected to remain so", which is *not* the same as "the device
     looks idle" -- an idle vehicle is one about to be started.
     """
+
+    def may_fetch(self) -> tuple[bool, str]:
+        """Return (allowed, human-readable reason) before the artifact GET."""
+        ...
 
     def may_flash(self) -> tuple[bool, str]:
         """Return (allowed, human-readable reason). The reason is reported

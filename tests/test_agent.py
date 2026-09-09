@@ -63,6 +63,22 @@ class StubGate:
         return (self.allowed, "ok" if self.allowed else "supply unstable")
 
 
+class StubFetchGate:
+    def __init__(self, fetch_allowed=True):
+        self.fetch_allowed = fetch_allowed
+        self.fetch_checks = 0
+
+    def may_flash(self):
+        return True, "ok"
+
+    def may_fetch(self):
+        self.fetch_checks += 1
+        return (
+            self.fetch_allowed,
+            "ok" if self.fetch_allowed else "quality=60 min=100",
+        )
+
+
 class StubHealth:
     def __init__(self, results):
         self.results = list(results)
@@ -145,9 +161,9 @@ def _update(version="1.0.0", sequence=1):
 
 
 def _agent(
-    tmp_path, source, gate, health, flashed=None, verify_ok=True, health_factory=None, verify_error=None, no_flash=False
+    tmp_path, source, gate, health, flashed=None, verify_ok=True, health_factory=None, verify_error=None, no_flash=False, fetch=None
 ):
-    def fetch(url, dest):
+    def default_fetch(url, dest):
         Path(dest).write_bytes(make_artifact_bytes())
         return Path(dest)
 
@@ -168,7 +184,7 @@ def _agent(
         health_factory=health_factory or (lambda version: health),
         target=TARGET,
         flash=flash,
-        fetch=fetch,
+        fetch=fetch or default_fetch,
         verify=verify,
         router_stopped=_fake_router_stopped,
         no_flash=no_flash,
@@ -198,6 +214,45 @@ def test_waits_when_the_gate_refuses(tmp_path):
     assert agent.run_once() == Phase.STAGED
     assert flashed == []
     assert (tmp_path / "staged.bin").is_file()
+
+
+def test_fetch_gate_refuses_before_download(tmp_path):
+    fetched = []
+    source = StubSource(_update(sequence=2))
+    gate = StubFetchGate(fetch_allowed=False)
+
+    def fetch(url, dest):
+        fetched.append(url)
+        Path(dest).write_bytes(make_artifact_bytes())
+        return Path(dest)
+
+    agent = _agent(tmp_path, source, gate, StubHealth([]), fetch=fetch)
+    assert agent.run_once() == Phase.IDLE
+    assert fetched == []
+    assert not (tmp_path / "staged.bin").exists()
+    assert Status.WAITING_FOR_GATE in [s for s, _ in source.reports]
+    assert not StateStore(tmp_path / "state.json").is_poisoned("1.0.0")
+    assert gate.fetch_checks == 1
+
+
+def test_fetch_gate_not_called_when_watermark_skips(tmp_path):
+    gate = StubFetchGate(fetch_allowed=False)
+    store = StateStore(tmp_path / "state.json")
+    state = store.load()
+    state.sequence = 102
+    store.save(state)
+    source = StubSource(_update(sequence=1))
+    fetched = []
+
+    def fetch(url, dest):
+        fetched.append(url)
+        return Path(dest)
+
+    agent = _agent(tmp_path, source, gate, StubHealth([]), fetch=fetch)
+    assert agent.run_once() == Phase.IDLE
+    assert fetched == []
+    assert gate.fetch_checks == 0
+    assert Status.VERIFIED in [s for s, _ in source.reports]
 
 
 def test_rejects_an_unverifiable_update_without_poisoning_unsigned_input(tmp_path):

@@ -384,6 +384,15 @@ class Agent:
         staged = self.state_dir / "staged.bin"
 
         # ---- fetch -------------------------------------------------------
+        fn = getattr(self.gate, "may_fetch", None)
+        if callable(fn):
+            allowed, reason = fn()
+            if not allowed:
+                log.info("fetch gated: %s", reason)
+                self.source.report(update, Status.WAITING_FOR_GATE, reason)
+                self._set(Phase.IDLE, clear_version=True)
+                return Phase.IDLE
+
         self._set(Phase.DOWNLOADING, update.version)
         self.source.report(update, Status.DOWNLOADING, "fetching artifact")
         try:
