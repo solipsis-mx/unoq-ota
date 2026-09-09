@@ -3,9 +3,10 @@
 Over-the-air firmware updates for the STM32U585 on an Arduino UNO Q, driven
 from the board's own Linux side.
 
-**Status:** sketch OTA, boot reconciler, and optional host payloads are
-implemented. AWS IoT Jobs remains an optional `UpdateSource` that is not
-shipped.
+**Status:** sketch OTA, boot reconciler, optional host payloads, verify-only
+checks (`--no-flash`), and AWS IoT Jobs as a poke trigger are implemented.
+Manifests still come from `LocalFileSource` or `HttpManifestSource` — Jobs
+does not replace those.
 
 ## The idea in one paragraph
 
@@ -184,8 +185,18 @@ Shipped:
 
 Optional extra (`pip install unoq-ota[aws]`):
 
-- `AwsIotJobsSource` — AWS IoT Jobs over MQTT. Worth it if you want per-device
-  targeting, staged rollout, and abort criteria without building them.
+- **IoT Jobs poke** (`unoq-ota jobs`) — AWS IoT Jobs over MQTT as a
+  **trigger**, not an `UpdateSource`. The manifest still comes from whichever
+  `--source` you configure (local, http, or s3). When a job with
+  `{"operation": "check"}` arrives, the agent runs one verify-only cycle
+  (`--no-flash` is forced) against that source, then reports SUCCEEDED or
+  FAILED to the job. Per-device targeting and rollout control live in Jobs;
+  artifact delivery stays on HTTP/S3/local.
+
+  CLI flags: `--iot-endpoint`, `--iot-cert`, `--iot-key`, `--iot-ca`,
+  `--thing-name`, `--mqtt-client-id` (default `{thing}-ota`; also
+  `UNOQ_OTA_IOT_*` / `UNOQ_OTA_MQTT_CLIENT_ID` env vars). All `--source`,
+  `--keys-dir`, and `--manifest-url` flags from `run` apply.
 
 ### `Gate` — when flashing is permitted
 
@@ -284,9 +295,18 @@ on a **poisoned list** when it fails. Without both, a firmware that reliably
 fails its health check produces an infinite flash–rollback–reoffer loop that
 keeps the device dead and burns flash endurance.
 
-`ROLLED_BACK` is terminal for that version. The source must not re-offer a
-poisoned version; `HttpManifestSource` and `AwsIotJobsSource` both consult the
-list locally, so this holds even if the server keeps advertising it.
+`ROLLED_BACK` is terminal for that version. The agent consults the poison list
+locally before download, so this holds even if the server keeps advertising it.
+
+### Verify-only checks (`--no-flash`)
+
+`run --once --no-flash` and `jobs` download and verify a manifest but never
+flash. On success the agent records `last_verified_sequence` (a watermark)
+and reports `VERIFIED`. Subsequent cycles skip work when the manifest's
+`sequence` is not newer than `max(sequence, last_verified_sequence)` — so a
+daily timer or repeated job poke does not re-fetch an unchanged manifest.
+
+Use this for unattended "is there an update?" checks without touching the MCU.
 
 ### On-disk state
 

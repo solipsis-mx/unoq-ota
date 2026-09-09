@@ -4,8 +4,8 @@ Over-the-air firmware updates for the Arduino UNO Q's STM32, driven from the
 board's own Linux side. No programmer, no USB cable, nobody standing next to
 the board.
 
-> Sketch OTA, boot recovery, and optional host-file payloads are implemented.
-> AWS IoT Jobs is designed as an `UpdateSource` extra and is **not shipped**.
+> Sketch OTA, boot recovery, optional host-file payloads, daily verify-only
+> checks, and AWS IoT Jobs as a poke trigger are implemented.
 > See [DESIGN.md](DESIGN.md).
 
 ## Why this works
@@ -217,7 +217,9 @@ is rejected at startup.
   (`Persistent=true`, `RandomizedDelaySec=900`). Enable the timer, not a
   long-running poller, when you want one verify-only pass a day. Pair it
   with a drop-in that sets `Type=oneshot`, clears `Restart=`, and runs
-  `--once --no-flash`:
+  `--once --no-flash`. That flag verifies the manifest and stamps a
+  sequence watermark but never flashes; if the manifest sequence is unchanged
+  since the last verify, the cycle is skipped.
 
 ```ini
 [Service]
@@ -231,8 +233,19 @@ ExecStart=/usr/local/bin/unoq-ota run --source s3 --once --no-flash \
 
 systemd without `Timezone=` should use `OnCalendar=*-*-* 09:00:00 UTC`.
 
-Optional environment in `/etc/unoq-ota/agent.env` (both units already
-read it): `UNOQ_OTA_REPORT_URL`, `UNOQ_OTA_DEVICE_ID`, `UNOQ_OTA_CORE_ROOT`.
+- `unoq-ota-jobs.service` — long-running MQTT listener for IoT Jobs pokes.
+  Each qualifying job (`{"operation": "check"}`) runs one verify-only cycle
+  against the same `--source` / `--manifest-url` you configure in a drop-in
+  (identical to the timer pattern above, but triggered on demand). Requires
+  `pip install 'unoq-ota[aws]'`. IoT endpoint, cert, key, CA, and thing name
+  come from flags or `/etc/unoq-ota/agent.env` (`UNOQ_OTA_IOT_*`). MQTT
+  `clientId` defaults to `{thing}-ota` (`UNOQ_OTA_MQTT_CLIENT_ID`); **it must
+  not equal the telemetry client's id** or the two connections will evict each
+  other.
+
+Optional environment in `/etc/unoq-ota/agent.env` (units already read it):
+`UNOQ_OTA_REPORT_URL`, `UNOQ_OTA_DEVICE_ID`, `UNOQ_OTA_CORE_ROOT`, and the
+`UNOQ_OTA_IOT_*` / `UNOQ_OTA_MQTT_CLIENT_ID` vars for the jobs unit.
 
 ## Security
 

@@ -19,22 +19,23 @@ Machine-local bench facts (IPs, serial, keys, installed units) live in
 `.claude.local.md` (gitignored). If that file is missing, treat the bench as
 unknown.
 
-## Status (2026-09-05)
+## Status (2026-09-08)
 
 | Area | State |
 |------|--------|
 | MCU signed HTTP/local OTA | Implemented; Wi-Fi pull proven on hardware |
 | systemd poller | Bench-proven: stock unit + drop-in, unattended coupled cycles, replay refusal |
+| Daily verify-only timer | `unoq-ota.timer` + `--once --no-flash`; sequence watermark skip |
+| AWS IoT Jobs poke | Shipped (`unoq-ota jobs`, `pip install 'unoq-ota[aws]'`); verify-only trigger for configured source |
 | Router-stop guard | Bench-proven after the irreversible-stop fix; dependents restored |
 | Boot reconciler | Implemented; mid-erase brick + **systemd** boot recovery proven |
 | Optional `host_payload` | **Hardware-proven 2026-09-05**: coupled apply, and rollback of host tree + MCU on a forced host-health failure |
 | Core-root override | `--core-root` / `UNOQ_OTA_CORE_ROOT`; bench-proven with `HOME=/root` |
 | Journal + `--report-url` | Implemented; `committed`, `rolled_back` and `rejected` POSTs all bench-proven |
 | `AlwaysGate` | Only gate shipped. Do not add a product-specific gate here |
-| AWS IoT Jobs | **Not shipped.** `pip extra` and DESIGN.md describe it; there is no module. Do not add it unless asked |
 | Agent self-update / rootfs / Zephyr core | Out of scope forever as currently designed |
 
-314 tests passing (`python3 -m pytest tests/ -q`).
+347 tests passing (`python3 -m pytest tests/ -q`).
 
 ## Commands
 
@@ -80,8 +81,9 @@ unoq_ota/
   state.py        fsync + atomic rename; default /var/lib/unoq-ota
   health/version_report.py   TCP 127.0.0.1:7500, not arduino-app-cli monitor
   sources/        local, http_manifest, reporting wrapper
+  jobs_runner.py  IoT Jobs poke (verify-only; not an UpdateSource)
   gates/always.py
-systemd/          reconcile (mandatory) + poller (needs drop-in for flags)
+systemd/          reconcile (mandatory) + poller/timer/jobs (drop-in for flags)
 tools/            keygen, sign-artifact, bench-http
 ```
 
@@ -156,22 +158,20 @@ optional unit restart/is-active. Any failure rolls **host then MCU**. Omit
   same cap the download enforces) for a `host_payload`, on **both** the
   state dir and `--host-dir`. It never trusts the manifest’s declared size:
   an inflated one would defer forever without counting an attempt.
-- `DESIGN.md` still describes `AwsIotJobsSource` as an optional extra. That
-  is aspirational. README is the honest status: not shipped.
+- **`jobs` MQTT clientId defaults to `{thing}-ota`.** It must differ from the
+  telemetry connection's id or AWS IoT will kick one client when the other
+  connects.
 
 ## Where to continue
 
 Prefer generic mechanisms that any integrator can use. Do not special-case a
 deployment.
 
-1. **Hardware-prove `host_payload`.** Sign a tiny tar.gz with a sketch,
-   apply with `--host-dir` / `--host-unit`, confirm rollback of **both** on
-   a forced host-health failure.
-2. Bench hygiene: the root poller owns `state.json`, so non-root runs now
+1. Bench hygiene: the root poller owns `state.json`, so non-root runs now
    fail with a clear `StateError`. Decide whether the agent should chown or
    the operator should.
-3. Do **not** implement AWS IoT Jobs, a custom `Gate`, an installer, or
-   Linux/rootfs OTA unless explicitly asked.
+2. Do **not** add a custom `Gate`, an installer, or Linux/rootfs OTA unless
+   explicitly asked.
 
 Fixed 2026-09-05 alongside the above: `State.core_version` is now written on
 every transition; an unreadable `state.json` raises `StateError` instead of
