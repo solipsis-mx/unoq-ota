@@ -257,6 +257,25 @@ def test_load_treats_an_absent_file_as_a_fresh_device(tmp_path):
     assert StateStore(tmp_path / "state.json").load() == State()
 
 
+def test_round_trips_last_verified_watermark(tmp_path):
+    store = StateStore(tmp_path / "state.json")
+    store.save(State(last_verified_sequence=11, last_verified_version="probe-solipsis-1"))
+    reloaded = store.load()
+    assert reloaded.last_verified_sequence == 11
+    assert reloaded.last_verified_version == "probe-solipsis-1"
+    assert reloaded.sequence == 0
+    assert reloaded.committed_version is None
+
+
+def test_missing_last_verified_sequence_sanitizes_to_zero(tmp_path):
+    path = tmp_path / "state.json"
+    path.write_text('{"phase": "idle", "sequence": 3}')
+    state = StateStore(path).load()
+    assert state.sequence == 3
+    assert state.last_verified_sequence == 0
+    assert state.last_verified_version is None
+
+
 def test_load_refuses_to_invent_a_fresh_state_for_a_file_it_cannot_read(tmp_path):
     # Found on the bench: running the poller as root against a state dir
     # owned by the interactive user leaves state.json root-owned, and a

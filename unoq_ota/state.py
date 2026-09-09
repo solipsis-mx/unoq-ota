@@ -43,6 +43,8 @@ class State:
     core_version: str | None = None
     committed_version: str | None = None
     previous_version: str | None = None
+    last_verified_sequence: int = 0
+    last_verified_version: str | None = None
 
 
 def _sanitize_attempts(value: object) -> dict:
@@ -154,6 +156,8 @@ class StateStore:
             core_version=_sanitize_optional_str(raw.get("core_version")),
             committed_version=_sanitize_optional_str(raw.get("committed_version")),
             previous_version=_sanitize_optional_str(raw.get("previous_version")),
+            last_verified_sequence=_sanitize_sequence(raw.get("last_verified_sequence")),
+            last_verified_version=_sanitize_optional_str(raw.get("last_verified_version")),
         )
 
     def save(self, state: State) -> None:
