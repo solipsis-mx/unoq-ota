@@ -295,6 +295,16 @@ class Agent:
             self._set(Phase.REJECTED, update.version)
             return Phase.REJECTED
 
+        state = self.store.load()
+        watermark = max(state.sequence, state.last_verified_sequence)
+        if update.sequence <= watermark:
+            log.info(
+                "up to date (sequence %s <= watermark %s)",
+                update.sequence,
+                watermark,
+            )
+            return Phase.IDLE
+
         self.state_dir.mkdir(parents=True, exist_ok=True)
 
         # ---- preflight -----------------------------------------------------

@@ -17,7 +17,7 @@ from unoq_ota.board import FlashTarget
 from unoq_ota.flasher import FlashError
 from unoq_ota.interfaces import Status, Update
 from unoq_ota.preflight import MAX_PAYLOAD_BYTES, PreflightError
-from unoq_ota.state import MAX_ATTEMPTS, Phase, StateStore
+from unoq_ota.state import MAX_ATTEMPTS, Phase, State, StateStore
 from unoq_ota.verify import VerificationError, canonical_bytes
 
 TARGET = FlashTarget(address=0x08100000, max_size=786432, core_version="1.0.0")
@@ -582,6 +582,46 @@ def test_run_once_does_not_propagate_when_wait_healthy_raises_after_the_flash(tm
 
     assert result == Phase.ROLLED_BACK
     assert flashed == ["staged.bin", "current.bin"]
+
+
+def test_skips_download_when_sequence_not_newer_than_watermark(tmp_path):
+    store = StateStore(tmp_path / "state.json")
+    store.save(State(last_verified_sequence=11, last_verified_version="probe"))
+    fetch_calls = []
+
+    def fetch(url, dest):
+        fetch_calls.append(url)
+
+    flashed = []
+    source = StubSource(_update(version="probe", sequence=11))
+    agent = _agent(tmp_path, source, StubGate(), StubHealth([True, True]), flashed)
+    agent._fetch = fetch
+
+    result = agent.run_once()
+
+    assert result == Phase.IDLE
+    assert fetch_calls == []
+    assert flashed == []
+
+
+def test_skips_download_when_sequence_not_newer_than_committed_sequence(tmp_path):
+    store = StateStore(tmp_path / "state.json")
+    store.save(State(sequence=5))
+    fetch_calls = []
+
+    def fetch(url, dest):
+        fetch_calls.append(url)
+
+    flashed = []
+    source = StubSource(_update(version="5.0.0", sequence=5))
+    agent = _agent(tmp_path, source, StubGate(), StubHealth([True, True]), flashed)
+    agent._fetch = fetch
+
+    result = agent.run_once()
+
+    assert result == Phase.IDLE
+    assert fetch_calls == []
+    assert flashed == []
 
 
 def test_a_poisoned_version_is_rejected_without_downloading(tmp_path):
