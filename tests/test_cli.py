@@ -194,6 +194,7 @@ def _run_args(tmp_path, **overrides):
         host_unit=None,
         core_root=None,
         max_payload_bytes=None,
+        no_flash=False,
     )
     defaults.update(overrides)
     return argparse.Namespace(**defaults)
@@ -255,6 +256,16 @@ def test_run_errors_clearly_when_http_source_missing_manifest_url(monkeypatch, t
 
     with pytest.raises(SystemExit):
         cli._run(args, parser)
+
+
+def test_run_passes_no_flash_to_agent(monkeypatch, tmp_path):
+    captured = {}
+    _patch_agent(monkeypatch, captured)
+    monkeypatch.setattr(cli, "resolve_flash_target", _fake_target)
+    (tmp_path / "keys").mkdir()
+    args = _run_args(tmp_path, no_flash=True, once=True)
+    assert cli._run(args, argparse.ArgumentParser()) == 0
+    assert captured["no_flash"] is True
 
 
 def test_run_once_runs_a_single_cycle_and_returns_without_sleeping(monkeypatch, tmp_path):

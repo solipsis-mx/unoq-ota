@@ -203,6 +203,7 @@ def _run(args, run_parser: argparse.ArgumentParser) -> int:
         host_restart=host_restart,
         host_health=host_health,
         host_max_bytes=max_payload,
+        no_flash=args.no_flash,
     )
 
     while True:
@@ -309,6 +310,9 @@ def main(argv=None) -> int:
         "--jitter", type=float, default=30.0, help="max random delay before an http poll (seconds)"
     )
     run.add_argument("--once", action="store_true", help="run a single cycle and exit")
+    run.add_argument(
+        "--no-flash", action="store_true", help="verify only; never flash"
+    )
     run.add_argument(
         "--host-dir",
         type=Path,
