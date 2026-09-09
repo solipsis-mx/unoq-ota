@@ -23,6 +23,28 @@ log = logging.getLogger(__name__)
 DEFAULT_TIMEOUT_S = 30.0
 
 
+def require_jitter_s(jitter_s: float) -> float:
+    """Reject inf/nan/negative jitter at construction, not at first poll.
+
+    inf/nan both pass a plain `isinstance` + `< 0` check (NaN compares False
+    either way), and `random.uniform(0, inf/nan)` doesn't raise -- it's
+    `time.sleep` fed the result that raises, which then reads on every poll
+    as an ordinary network-fetch failure. That makes a permanently dead
+    device indistinguishable from a flaky link. Reject loudly where the
+    misconfiguration was made.
+    """
+    if (
+        not isinstance(jitter_s, (int, float))
+        or isinstance(jitter_s, bool)
+        or not math.isfinite(jitter_s)
+        or jitter_s < 0
+    ):
+        raise ValueError(
+            f"jitter_s must be a finite non-negative number, got {jitter_s!r}"
+        )
+    return float(jitter_s)
+
+
 def download(url: str, dest: Path, session=None, max_bytes: int = MAX_PAYLOAD_BYTES) -> Path:
     """Stream a URL to disk with a hard size cap.
 
@@ -63,26 +85,10 @@ def download(url: str, dest: Path, session=None, max_bytes: int = MAX_PAYLOAD_BY
 
 class HttpManifestSource:
     def __init__(self, manifest_url: str, poisoned=None, session=None, jitter_s: float = 30.0):
-        if (
-            not isinstance(jitter_s, (int, float))
-            or isinstance(jitter_s, bool)
-            or not math.isfinite(jitter_s)
-            or jitter_s < 0
-        ):
-            # inf/nan both pass a plain `isinstance` + `< 0` check (NaN
-            # compares False either way), and `random.uniform(0, inf/nan)`
-            # doesn't raise -- it's `time.sleep` fed the result that raises,
-            # which then reads on every poll as an ordinary network-fetch
-            # failure ("manifest fetch failed"). That makes a permanently
-            # dead device indistinguishable from a flaky link. Reject at
-            # construction, loudly, where the misconfiguration was made.
-            raise ValueError(
-                f"jitter_s must be a finite non-negative number, got {jitter_s!r}"
-            )
         self.manifest_url = manifest_url
         self._poisoned = poisoned or (lambda version: False)
         self._session = session or requests
-        self.jitter_s = jitter_s
+        self.jitter_s = require_jitter_s(jitter_s)
 
     def check(self):
         try:

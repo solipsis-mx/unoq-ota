@@ -24,6 +24,7 @@ unknown.
 | Area | State |
 |------|--------|
 | MCU signed HTTP/local OTA | Implemented; Wi-Fi pull proven on hardware |
+| S3 source (`--source s3`) | Implemented; mints GET URLs at fetch time. Not yet hardware-proven |
 | systemd poller | Bench-proven: stock unit + drop-in, unattended coupled cycles, replay refusal |
 | Daily verify-only timer | `unoq-ota.timer` + `--once --no-flash`; sequence watermark skip |
 | AWS IoT Jobs poke | Shipped (`unoq-ota jobs`, `pip install 'unoq-ota[aws]'`); verify-only trigger for configured source |
@@ -35,7 +36,7 @@ unknown.
 | `AlwaysGate` | Only gate shipped. Do not add a product-specific gate here |
 | Agent self-update / rootfs / Zephyr core | Out of scope forever as currently designed |
 
-347 tests passing (`python3 -m pytest tests/ -q`).
+370 tests passing (`python3 -m pytest tests/ -q`).
 
 ## Commands
 
@@ -80,7 +81,7 @@ unoq_ota/
   events.py       journal.ndjson + best-effort POST
   state.py        fsync + atomic rename; default /var/lib/unoq-ota
   health/version_report.py   TCP 127.0.0.1:7500, not arduino-app-cli monitor
-  sources/        local, http_manifest, reporting wrapper
+  sources/        local, http_manifest, s3_presigned, reporting wrapper
   jobs_runner.py  IoT Jobs poke (verify-only; not an UpdateSource)
   gates/always.py
 systemd/          reconcile (mandatory) + poller/timer/jobs (drop-in for flags)
@@ -167,10 +168,14 @@ optional unit restart/is-active. Any failure rolls **host then MCU**. Omit
 Prefer generic mechanisms that any integrator can use. Do not special-case a
 deployment.
 
-1. Bench hygiene: the root poller owns `state.json`, so non-root runs now
+1. **Rewire the bench poller to `--source s3`.** Sign the manifest with
+   `s3://` artifact URLs, put GetObject credentials on the device (never a
+   presigned URL in the unit file), confirm one cycle. Then re-run LTE-only
+   (`wlan0` down) and a forced health-failure rollback over cellular.
+2. Bench hygiene: the root poller owns `state.json`, so non-root runs now
    fail with a clear `StateError`. Decide whether the agent should chown or
    the operator should.
-2. Do **not** add a custom `Gate`, an installer, or Linux/rootfs OTA unless
+3. Do **not** add a custom `Gate`, an installer, or Linux/rootfs OTA unless
    explicitly asked.
 
 Fixed 2026-09-05 alongside the above: `State.core_version` is now written on

@@ -143,12 +143,30 @@ def test_fetch_resolves_a_bare_relative_path_against_source_dir(tmp_path):
 
 
 def test_fetch_raises_a_clear_error_on_an_unsupported_scheme(tmp_path):
-    # s3://... used to be silently treated as a literal filesystem path,
-    # failing safely ("download failed") but hiding the real cause.
+    # ftp://... used to be silently treated as a literal filesystem path,
+    # failing safely ("download failed") but hiding the real cause. s3:// is
+    # a real source (mint a GET at fetch time); it is not in this list.
     dest = tmp_path / "out.bin"
 
     with pytest.raises(ValueError, match="unsupported URL scheme"):
-        cli._fetch("s3://bucket/key", dest, None)
+        cli._fetch("ftp://example.invalid/key", dest, None)
+
+
+def test_fetch_dispatches_s3_scheme_to_download_s3(monkeypatch, tmp_path):
+    calls = []
+
+    def fake_download_s3(url, dest, max_bytes=None, client=None):
+        calls.append((url, dest, max_bytes, client))
+        dest.write_bytes(b"payload")
+
+    monkeypatch.setattr(cli, "download_s3", fake_download_s3)
+    dest = tmp_path / "out.bin"
+    client = object()
+
+    cli._fetch("s3://updates/a.bin", dest, None, s3_client=client)
+
+    assert calls == [("s3://updates/a.bin", dest, cli.MAX_PAYLOAD_BYTES, client)]
+    assert dest.read_bytes() == b"payload"
 
 
 # ---------------------------------------------------------------------------
@@ -259,6 +277,78 @@ def test_run_errors_clearly_when_http_source_missing_manifest_url(monkeypatch, t
         cli._run(args, parser)
 
 
+def test_run_errors_clearly_when_s3_source_missing_manifest_url(monkeypatch, tmp_path):
+    monkeypatch.setattr(cli, "resolve_flash_target", _fake_target)
+    args = _run_args(tmp_path, source="s3", source_dir=None, manifest_url=None)
+    parser = argparse.ArgumentParser()
+
+    with pytest.raises(SystemExit):
+        cli._run(args, parser)
+
+
+def test_run_errors_clearly_when_s3_manifest_url_is_https(monkeypatch, tmp_path):
+    # A leftover presigned https URL is the fixture this source exists to
+    # replace. Fail at startup, not with a 403 on every poll.
+    monkeypatch.setattr(cli, "resolve_flash_target", _fake_target)
+    monkeypatch.setattr(
+        "unoq_ota.sources.s3_presigned.default_client", lambda region=None: object()
+    )
+    args = _run_args(
+        tmp_path,
+        source="s3",
+        source_dir=None,
+        manifest_url="https://example.invalid/manifest.json",
+    )
+    parser = argparse.ArgumentParser()
+
+    with pytest.raises(SystemExit):
+        cli._run(args, parser)
+
+
+def test_run_wires_the_s3_source_and_shares_its_client(monkeypatch, tmp_path):
+    from unoq_ota.sources.s3_presigned import S3PresignedSource
+
+    fake_client = object()
+    captured: dict = {}
+    monkeypatch.setattr(cli, "resolve_flash_target", _fake_target)
+    monkeypatch.setattr(
+        "unoq_ota.sources.s3_presigned.default_client", lambda region=None: fake_client
+    )
+    _patch_agent(monkeypatch, captured)
+
+    args = _run_args(
+        tmp_path,
+        source="s3",
+        source_dir=None,
+        manifest_url="s3://updates/manifest.json",
+        s3_region="us-east-2",
+    )
+    assert cli._run(args, argparse.ArgumentParser()) == 0
+
+    inner = captured["source"]._inner
+    assert isinstance(inner, S3PresignedSource)
+    assert inner.bucket == "updates"
+    assert inner.key == "manifest.json"
+    assert inner._s3_client is fake_client
+
+
+def test_run_errors_when_the_s3_extra_is_missing(monkeypatch, tmp_path):
+    from unoq_ota.sources.s3_presigned import S3Error
+
+    def boom(region=None):
+        raise S3Error("S3 source requires botocore; install with: pip install 'unoq-ota[s3]'")
+
+    monkeypatch.setattr(cli, "resolve_flash_target", _fake_target)
+    monkeypatch.setattr("unoq_ota.sources.s3_presigned.default_client", boom)
+    args = _run_args(
+        tmp_path, source="s3", source_dir=None, manifest_url="s3://updates/m.json"
+    )
+    parser = argparse.ArgumentParser()
+
+    with pytest.raises(SystemExit):
+        cli._run(args, parser)
+
+
 def test_run_passes_no_flash_to_agent(monkeypatch, tmp_path):
     captured = {}
     _patch_agent(monkeypatch, captured)
@@ -362,10 +452,13 @@ def test_main_help_exits_cleanly():
     assert exc_info.value.code == 0
 
 
-def test_main_run_help_exits_cleanly():
+def test_main_run_help_exits_cleanly(capsys):
     with pytest.raises(SystemExit) as exc_info:
         cli.main(["run", "--help"])
     assert exc_info.value.code == 0
+    help_text = capsys.readouterr().out
+    assert "s3" in help_text
+    assert "--manifest-url" in help_text
 
 
 def test_main_jobs_help_exits_cleanly(capsys):

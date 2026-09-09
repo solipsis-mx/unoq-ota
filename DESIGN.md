@@ -182,6 +182,9 @@ Shipped:
 - `HttpManifestSource` — polls a manifest URL. Works with any static host:
   S3, GitHub Releases, a plain web server. **The default for most users.**
   Polls with jitter so a fleet doesn't update in lockstep.
+- `S3PresignedSource` (`pip install unoq-ota[s3]`) — polls `s3://bucket/key`.
+  Mints a short-lived GET URL on every fetch from the standard AWS credential
+  chain, so a unit file never has to hold a URL that expires.
 
 Optional extra (`pip install unoq-ota[aws]`):
 

@@ -21,6 +21,7 @@ Source = "https://github.com/solipsis-mx/unoq-ota"
 
 [project.optional-dependencies]
 aws = ["awsiotsdk>=1.11"]
+s3 = ["botocore>=1.29"]
 dev = ["pytest>=7.0"]
 
 [project.scripts]

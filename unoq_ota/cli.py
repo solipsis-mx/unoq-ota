@@ -31,6 +31,7 @@ from unoq_ota.reconciler import reconcile
 from unoq_ota.sources.http_manifest import HttpManifestSource, download
 from unoq_ota.sources.local import LocalFileSource
 from unoq_ota.sources.reporting import ReportingSource
+from unoq_ota.sources.s3_presigned import S3Error, S3PresignedSource, download_s3
 from unoq_ota.state import DEFAULT_STATE_DIR, StateError, StateStore
 
 log = logging.getLogger(__name__)
@@ -54,28 +55,39 @@ def _load_public_keys(keys_dir: Path) -> dict:
 
 
 def _fetch(
-    url: str, dest: Path, source_dir: Path | None, max_bytes: int = MAX_PAYLOAD_BYTES
+    url: str,
+    dest: Path,
+    source_dir: Path | None,
+    max_bytes: int = MAX_PAYLOAD_BYTES,
+    s3_client=None,
 ) -> None:
     """Fetch an artifact named by a manifest's `artifact.url`.
 
     An http(s) URL is downloaded with `unoq_ota.sources.http_manifest`'s own
-    size-capped, cleans-up-on-failure `download()`. A `file://` URL or a bare
-    path is treated as local -- resolved against `source_dir` when relative
-    -- which is what makes `LocalFileSource` usable for bench and air-gapped
-    setups where the artifact sits next to `manifest.json` rather than behind
-    a URL. Anything else (e.g. `s3://...`) is an explicit configuration
-    mistake: silently treating it as a local path used to fail safely --
-    "download failed", from a `FileNotFoundError` on a path that was never a
-    path -- but hid the real cause, so it is rejected here instead.
+    size-capped, cleans-up-on-failure `download()`. An `s3://` URI is
+    presigned at fetch time and then streamed through the same downloader.
+    A `file://` URL or a bare path is treated as local -- resolved against
+    `source_dir` when relative -- which is what makes `LocalFileSource`
+    usable for bench and air-gapped setups where the artifact sits next to
+    `manifest.json` rather than behind a URL. Anything else (e.g. `ftp://`)
+    is an explicit configuration mistake: silently treating it as a local
+    path used to fail safely -- "download failed", from a `FileNotFoundError`
+    on a path that was never a path -- but hid the real cause, so it is
+    rejected here instead.
     """
     scheme = urlsplit(url).scheme
     if scheme in ("http", "https"):
         download(url, dest, max_bytes=max_bytes)
         return
+    if scheme == "s3":
+        # Mint a short-lived GET at fetch time so the signed manifest can
+        # name an s3:// object identity instead of a URL that expires.
+        download_s3(url, dest, max_bytes=max_bytes, client=s3_client)
+        return
     if scheme not in ("", "file"):
         raise ValueError(
             f"unsupported URL scheme {scheme!r} in artifact url {url!r} "
-            "(expected http, https, file, or a bare path)"
+            "(expected http, https, s3, file, or a bare path)"
         )
     raw_path = url[len("file://") :] if scheme == "file" else url
     src = Path(raw_path)
@@ -179,12 +191,35 @@ def _build_agent(args, source_parser: argparse.ArgumentParser) -> Agent:
     # same policy, and a site whose host tarball is bigger than the default
     # has to be able to raise both together.
     max_payload = getattr(args, "max_payload_bytes", None) or MAX_PAYLOAD_BYTES
+    s3_client = None
+    s3_region = getattr(args, "s3_region", None)
 
     if args.source == "local":
         if not args.source_dir:
             source_parser.error("--source local requires --source-dir")
         source = LocalFileSource(args.source_dir, poisoned=store.is_poisoned)
         fetch = lambda url, dest: _fetch(url, dest, args.source_dir, max_payload)  # noqa: E731
+    elif args.source == "s3":
+        if not args.manifest_url:
+            source_parser.error("--source s3 requires --manifest-url (an s3:// URI)")
+        try:
+            from unoq_ota.sources.s3_presigned import default_client
+
+            s3_client = default_client(s3_region)
+            source = S3PresignedSource(
+                args.manifest_url,
+                poisoned=store.is_poisoned,
+                jitter_s=args.jitter,
+                s3_client=s3_client,
+                region=s3_region,
+            )
+        except S3Error as exc:
+            source_parser.error(str(exc))
+        except ValueError as exc:
+            source_parser.error(str(exc))
+        fetch = lambda url, dest: _fetch(  # noqa: E731
+            url, dest, None, max_payload, s3_client=s3_client
+        )
     else:
         if not args.manifest_url:
             source_parser.error("--source http requires --manifest-url")
@@ -339,12 +374,19 @@ def main(argv=None) -> int:
     validate.add_argument("artifact", type=Path)
 
     source_parent = argparse.ArgumentParser(add_help=False)
-    source_parent.add_argument("--source", choices=("local", "http"), required=True)
+    source_parent.add_argument("--source", choices=("local", "http", "s3"), required=True)
     source_parent.add_argument(
         "--source-dir", type=Path, default=None, help="directory holding manifest.json (local source)"
     )
     source_parent.add_argument(
-        "--manifest-url", default=None, help="URL to poll for manifest.json (http source)"
+        "--manifest-url",
+        default=None,
+        help="URL to poll for manifest.json (http source) or s3://bucket/key (s3 source)",
+    )
+    source_parent.add_argument(
+        "--s3-region",
+        default=os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION"),
+        help="AWS region for the s3 source (also reads AWS_REGION)",
     )
     source_parent.add_argument(
         "--keys-dir", type=Path, required=True, help="directory of <key_id>.public.b64 trusted keys"
