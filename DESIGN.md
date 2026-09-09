@@ -191,7 +191,9 @@ Optional extra (`pip install unoq-ota[aws]`):
   `{"operation": "check"}` arrives, the agent runs one verify-only cycle
   (`--no-flash` is forced) against that source, then reports SUCCEEDED or
   FAILED to the job. Per-device targeting and rollout control live in Jobs;
-  artifact delivery stays on HTTP/S3/local.
+  artifact delivery stays on HTTP/S3/local. Job documents carry only the
+  operation — no manifest or artifact URLs. Those belong in the device
+  drop-in (`--source`, `--manifest-url`, `--keys-dir`).
 
   CLI flags: `--iot-endpoint`, `--iot-cert`, `--iot-key`, `--iot-ca`,
   `--thing-name`, `--mqtt-client-id` (default `{thing}-ota`; also
@@ -300,13 +302,21 @@ locally before download, so this holds even if the server keeps advertising it.
 
 ### Verify-only checks (`--no-flash`)
 
-`run --once --no-flash` and `jobs` download and verify a manifest but never
-flash. On success the agent records `last_verified_sequence` (a watermark)
-and reports `VERIFIED`. Subsequent cycles skip work when the manifest's
-`sequence` is not newer than `max(sequence, last_verified_sequence)` — so a
-daily timer or repeated job poke does not re-fetch an unchanged manifest.
+`run --once --no-flash` and `jobs` are for unattended "is there an update?"
+checks without touching the MCU.
 
-Use this for unattended "is there an update?" checks without touching the MCU.
+Every daily timer tick or Jobs poke **always GETs the manifest** from the
+configured `--source` / `--manifest-url`. The agent then compares the
+manifest's `sequence` against `max(state.sequence, state.last_verified_sequence)`:
+it **downloads and verifies the artifact** (and `host_payload`, if present)
+only when `update.sequence` is strictly newer than that watermark. When the
+sequence is not newer, artifact work is skipped — the manifest fetch already
+happened.
+
+On a successful verify-only pass the agent reports `VERIFIED`, stamps
+`last_verified_sequence` and `last_verified_version`, deletes `staged.bin`
+and `staged-host.tar.gz`, and does **not** bump `state.sequence` or
+`committed_version`.
 
 ### On-disk state
 

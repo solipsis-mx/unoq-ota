@@ -217,9 +217,11 @@ is rejected at startup.
   (`Persistent=true`, `RandomizedDelaySec=900`). Enable the timer, not a
   long-running poller, when you want one verify-only pass a day. Pair it
   with a drop-in that sets `Type=oneshot`, clears `Restart=`, and runs
-  `--once --no-flash`. That flag verifies the manifest and stamps a
-  sequence watermark but never flashes; if the manifest sequence is unchanged
-  since the last verify, the cycle is skipped.
+  `--once --no-flash`. The manifest is always fetched; artifact download and
+  verify run only when the manifest sequence is newer than the last committed
+  or verified sequence. Successful verify-only passes stamp `last_verified_*`
+  and never flash. When the sequence is unchanged, artifact work is skipped
+  (the manifest GET still runs).
 
 ```ini
 [Service]
