@@ -81,6 +81,8 @@ def wrap_run_cycle(run_once: Callable[[], object], source) -> Callable[[], objec
     source.report = report
 
     def run_cycle():
+        last["status"] = None
+        last["detail"] = ""
         phase = run_once()
         return SimpleNamespace(
             value=getattr(phase, "value", phase),

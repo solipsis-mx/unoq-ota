@@ -217,6 +217,34 @@ def test_wrap_run_cycle_maps_rejected_report_to_failed_job():
     assert "download failed" in detail
 
 
+def test_wrap_run_cycle_resets_report_between_cycles():
+    """REJECTED then idle skip must not inherit the prior report."""
+    from unoq_ota.jobs_runner import wrap_run_cycle
+
+    class Src:
+        def report(self, update, status, detail):
+            pass
+
+    src = Src()
+    calls = []
+
+    def run_once():
+        calls.append("ran")
+        if len(calls) == 1:
+            src.report(None, Status.REJECTED, "download failed: timeout")
+        return Phase.IDLE
+
+    run_cycle = wrap_run_cycle(run_once, src)
+
+    status1, detail1 = handle_execution({"operation": "check"}, run_cycle)
+    assert status1 == "FAILED"
+    assert "download failed" in detail1
+
+    status2, detail2 = handle_execution({"operation": "check"}, run_cycle)
+    assert status2 == "SUCCEEDED"
+    assert detail2 == "idle"
+
+
 class _FakeFuture:
     def result(self):
         return None
