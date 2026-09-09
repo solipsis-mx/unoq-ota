@@ -52,3 +52,14 @@ def test_jobs_unit_is_a_long_running_listener():
     assert "EnvironmentFile=-/etc/unoq-ota/agent.env" in text
     assert "ExecStart=/usr/local/bin/unoq-ota jobs" in text
     assert "solipsis" not in text.lower()
+
+
+def test_readme_timer_is_unusable_without_oneshot_drop_in():
+    import re
+
+    text = (ROOT / "README.md").read_text()
+    collapsed = re.sub(r"\s+", " ", text)
+    assert "timer is unusable until a drop-in" in collapsed
+    assert "Type=oneshot" in text
+    assert "--once --no-flash" in text
+    assert "do not enable the long-running service" in collapsed.lower()

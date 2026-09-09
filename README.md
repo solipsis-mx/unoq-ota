@@ -110,9 +110,12 @@ python3 -m venv .venv
 ```
 
 That provides the `unoq-ota` console script. A device install typically
-symlinks it to `/usr/local/bin/unoq-ota`. Copy `systemd/unoq-ota.service`
-and `systemd/unoq-ota.timer` onto the board for a daily verify-only
-check; see [systemd](#systemd).
+symlinks it to `/usr/local/bin/unoq-ota`. The stock `unoq-ota.service` is
+a long-running poller (`Type=simple`, `Restart=always`). Copying it with
+`unoq-ota.timer` is not a daily verify-only install: the timer is unusable
+until a drop-in sets `Type=oneshot`, clears `Restart=`, and adds
+`--once --no-flash`. Enable the timer; do not enable the long-running
+service alongside it. See [systemd](#systemd).
 
 ## Sketch contract
 
@@ -214,14 +217,16 @@ mint URLs the same way. A leftover https presigned URL in `--manifest-url`
 is rejected at startup.
 
 - `unoq-ota.timer` — daily check at 03:00 America/Mexico_City
-  (`Persistent=true`, `RandomizedDelaySec=900`). Enable the timer, not a
-  long-running poller, when you want one verify-only pass a day. Pair it
-  with a drop-in that sets `Type=oneshot`, clears `Restart=`, and runs
-  `--once --no-flash`. The manifest is always fetched; artifact download and
-  verify run only when the manifest sequence is newer than the last committed
-  or verified sequence. Successful verify-only passes stamp `last_verified_*`
-  and never flash. When the sequence is unchanged, artifact work is skipped
-  (the manifest GET still runs).
+  (`Persistent=true`, `RandomizedDelaySec=900`). The timer is unusable
+  until a drop-in sets `Type=oneshot`, clears `Restart=`, and runs
+  `--once --no-flash`. Enable the timer only; do not enable the long-running
+  service alongside it. The stock unit stays `Type=simple` / `Restart=always`
+  for benches that want a poller. The manifest is always fetched; artifact
+  download and verify run only when the manifest sequence is newer than the
+  last committed or verified sequence. Successful verify-only passes stamp
+  `last_verified_*` and never flash. When the sequence is unchanged, leftover
+  `staged.bin` / `staged-host.tar.gz` are unlinked so they cannot bait the
+  boot reconciler, and artifact work is skipped (the manifest GET still runs).
 
 ```ini
 [Service]
