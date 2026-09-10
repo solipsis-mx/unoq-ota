@@ -568,7 +568,7 @@ def test_a_realistic_manifest_stays_under_the_kms_raw_message_limit(keypair):
             "version": "1.2.3-a-fairly-long-version-string",
             "sequence": 123456,
             "artifact": {
-                "url": "s3://solipsis-ota-releases-813891000708/releases/v1.2.3/artifact.bin",
+                "url": "s3://example-ota-releases-000000000000/releases/v1.2.3/artifact.bin",
                 "size": 786432,
                 "sha256": "a" * 64,
             },
@@ -579,7 +579,7 @@ def test_a_realistic_manifest_stays_under_the_kms_raw_message_limit(keypair):
                 "partition_size": 786432,
             },
             "host_payload": {
-                "url": "s3://solipsis-ota-releases-813891000708/releases/v1.2.3/host.tar.gz",
+                "url": "s3://example-ota-releases-000000000000/releases/v1.2.3/host.tar.gz",
                 "size": 1048576,
                 "sha256": "b" * 64,
             },
