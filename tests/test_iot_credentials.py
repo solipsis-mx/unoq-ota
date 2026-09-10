@@ -86,3 +86,32 @@ def test_fetch_role_alias_credentials_raises_on_http_error():
     session = _FakeSession(_FakeResponse(status_code=403))
     with pytest.raises(IotCredentialsError, match="request failed"):
         fetch_role_alias_credentials("ep", "alias", "thing", "c", "k", "ca", session=session)
+
+
+def test_fetch_role_alias_credentials_does_not_leak_credential_values():
+    """Verify that real credential values never appear in error messages."""
+    secret_key_id = "AKIA-SHOULD-NOT-LEAK"
+    secret_value = "SuperSecretValue123!"
+    session = _FakeSession(
+        _FakeResponse(
+            payload={
+                "credentials": {
+                    "accessKeyId": secret_key_id,
+                    "secretAccessKey": secret_value,
+                    # Missing sessionToken and expiration
+                }
+            }
+        )
+    )
+    with pytest.raises(IotCredentialsError) as exc_info:
+        fetch_role_alias_credentials("ep", "alias", "thing", "c", "k", "ca", session=session)
+
+    error_str = str(exc_info.value)
+    # Verify the error message mentions the missing field and present keys
+    assert "missing" in error_str
+    assert "present keys" in error_str
+    assert "accessKeyId" in error_str
+    assert "secretAccessKey" in error_str
+    # But the actual credential values must NOT appear
+    assert secret_key_id not in error_str
+    assert secret_value not in error_str

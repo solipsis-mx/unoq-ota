@@ -67,7 +67,9 @@ def fetch_role_alias_credentials(
             "Expiration": creds["expiration"],
         }
     except KeyError as exc:
-        raise IotCredentialsError(f"credentials response missing {exc}: {creds!r}") from exc
+        raise IotCredentialsError(
+            f"credentials response missing {exc}; present keys: {sorted(creds.keys())!r}"
+        ) from exc
 
 
 def main(argv=None) -> int:
