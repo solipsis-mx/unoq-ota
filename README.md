@@ -133,6 +133,8 @@ collects them from TCP `127.0.0.1:7500` (the router packet path), not from
 
 The private key never goes on a device.
 
+### PEM key mode
+
 ```bash
 tools/keygen.py --key-id bench --out-dir /path/to/keys
 # copies to the device:  /etc/unoq-ota/keys/bench.public.b64
@@ -144,6 +146,17 @@ tools/sign-artifact.py sketch.bin --version 1.0.0 --sequence 1 \
   --out manifest.json
 # optional coupled host files:
 #   --host-payload app.tar.gz --host-url https://example.com/app.tar.gz
+```
+
+### AWS KMS mode
+
+```bash
+tools/sign-artifact.py sketch.bin --version 1.0.0 --sequence 1 \
+  --url s3://your-bucket/releases/v1.0.0/artifact.bin \
+  --kms-key-id alias/your-ota-signing-key --kms-region us-east-2 \
+  --key-id kms-2026 --out manifest.json
+# requires: pip install 'unoq-ota[s3]'  (botocore)
+# requires: AWS credentials in the standard chain with kms:Sign on that key
 ```
 
 `--out` writes the manifest to a file. Without it, the JSON goes to stdout
