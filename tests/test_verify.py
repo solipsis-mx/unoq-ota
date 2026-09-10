@@ -558,3 +558,34 @@ def test_verify_manifest_without_host_payload_path_does_not_check_host_bytes(key
         key,
     )
     verify_manifest(manifest, public_keys, last_sequence=0)
+
+
+def test_a_realistic_manifest_stays_under_the_kms_raw_message_limit(keypair):
+    key, _ = keypair
+    manifest = _signed(
+        {
+            "schema": 1,
+            "version": "1.2.3-a-fairly-long-version-string",
+            "sequence": 123456,
+            "artifact": {
+                "url": "s3://solipsis-ota-releases-813891000708/releases/v1.2.3/artifact.bin",
+                "size": 786432,
+                "sha256": "a" * 64,
+            },
+            "target": {
+                "board": "arduino_uno_q",
+                "link_mode": "dynamic",
+                "sketch_offset": "0x08100000",
+                "partition_size": 786432,
+            },
+            "host_payload": {
+                "url": "s3://solipsis-ota-releases-813891000708/releases/v1.2.3/host.tar.gz",
+                "size": 1048576,
+                "sha256": "b" * 64,
+            },
+            "not_before": "2026-09-10T00:00:00Z",
+            "expires": "2027-09-10T00:00:00Z",
+        },
+        key,
+    )
+    assert len(canonical_bytes(manifest)) < 4096
