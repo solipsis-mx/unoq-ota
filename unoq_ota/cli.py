@@ -179,6 +179,12 @@ def _build_agent(args, source_parser: argparse.ArgumentParser) -> Agent:
     deployment. Everything else -- Agent, the sources, the health check --
     stays deployment-agnostic.
     """
+    gate_name = getattr(args, "gate", None) or "always"
+    if gate_name not in ("always", "cellular-signal"):
+        source_parser.error(
+            f"invalid gate {gate_name!r} (expected always or cellular-signal)"
+        )
+
     target = resolve_flash_target(getattr(args, "core_root", None))
     public_keys = _load_public_keys(args.keys_dir)
     # Shared with the Agent's own internal StateStore, which is created at
@@ -235,7 +241,6 @@ def _build_agent(args, source_parser: argparse.ArgumentParser) -> Agent:
     host_restart, host_health = _host_hooks(args)
     host_dir = getattr(args, "host_dir", None)
 
-    gate_name = getattr(args, "gate", None) or "always"
     if gate_name == "cellular-signal":
         cmd = getattr(args, "signal_cmd", None)
         gate = CellularSignalGate(

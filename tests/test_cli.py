@@ -626,6 +626,30 @@ def test_main_jobs_help_exits_cleanly(capsys):
     assert "--signal-cmd" in help_text
 
 
+def test_main_run_rejects_invalid_gate_from_environment(monkeypatch, tmp_path):
+    monkeypatch.setenv("UNOQ_OTA_GATE", "not-a-gate")
+    keys = tmp_path / "keys"
+    keys.mkdir()
+    src = tmp_path / "src"
+    src.mkdir()
+    with pytest.raises(SystemExit) as exc_info:
+        cli.main(
+            [
+                "--state-dir",
+                str(tmp_path / "state"),
+                "run",
+                "--once",
+                "--source",
+                "local",
+                "--source-dir",
+                str(src),
+                "--keys-dir",
+                str(keys),
+            ]
+        )
+    assert exc_info.value.code != 0
+
+
 def test_run_gate_defaults_to_environment(monkeypatch, tmp_path):
     from unoq_ota.gates.cellular_signal import CellularSignalGate
 
