@@ -166,6 +166,25 @@ produces a valid document.
 `tools/bench-http.py` serves a directory and accepts `POST /events`, so a
 bench can exercise the whole pull path without a cloud account.
 
+## Using an IoT role alias for S3 credentials (`--source s3`)
+
+If your device already has an IoT mutual-TLS certificate (e.g. for IoT
+Jobs) and an IoT role alias granting S3 access, point botocore's
+standard credential chain at it instead of a static access key:
+
+    # ~/.aws/config on the device
+    [default]
+    credential_process = unoq-ota-iot-credentials \
+      --endpoint your-account-credentials.iot.us-east-2.amazonaws.com \
+      --role-alias your-role-alias \
+      --thing-name your-thing-name \
+      --cert /etc/unoq-ota/device.cert.pem \
+      --key /etc/unoq-ota/device.key.pem \
+      --ca /etc/unoq-ota/AmazonRootCA1.pem
+
+`unoq-ota run --source s3 ...` will pick this up with no other change --
+`S3PresignedSource` already builds its client from the standard chain.
+
 ## Running on a board
 
 ```bash
