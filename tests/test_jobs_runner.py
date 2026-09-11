@@ -353,7 +353,7 @@ def test_build_aws_jobs_client_does_not_open_tls_when_clock_is_epoch(monkeypatch
 
     Jobs must raise PreflightError *before* importing awsiotsdk / opening a
     socket so systemd Restart=always can wait for NTP. Do not prove this by
-    yanks of CLOCK_REALTIME on a live truck.
+    yanks of CLOCK_REALTIME on a live board.
     """
     from datetime import datetime, timezone
 

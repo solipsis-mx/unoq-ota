@@ -1,9 +1,9 @@
 """Fix libc DNS when wifi-down leaves LAN nameservers on a cellular default.
 
-NetworkManager sometimes rewrites `/etc/resolv.conf` to the ECM gateway and
-8.8.8.8 on wifi-off, and sometimes leaves CasaPR-style RFC1918 nameservers
-that are no longer on-link. Writing *before* wifi-off is useless: NM overwrites
-the file on disconnect. Call this *after* the default route is cellular.
+NetworkManager sometimes rewrites `/etc/resolv.conf` to the cellular gateway
+and 8.8.8.8 on wifi-off, and sometimes leaves RFC1918 nameservers that are
+no longer on-link. Writing *before* wifi-off is useless: NM overwrites the
+file on disconnect. Call this *after* the default route is cellular.
 """
 
 from __future__ import annotations
