@@ -20,7 +20,13 @@ from unoq_ota.preflight import MAX_PAYLOAD_BYTES
 
 log = logging.getLogger(__name__)
 
-DEFAULT_TIMEOUT_S = 30.0
+# (connect, read). Connect stays 30 s so a dead peer fails fast; read is long
+# enough for a MAX_PAYLOAD_BYTES artifact on a weak cellular link. A 30 s
+# combined timeout was a live miss: an LTE cycle already took 42 s on a
+# working modem.
+CONNECT_TIMEOUT_S = 30.0
+READ_TIMEOUT_S = 180.0
+DEFAULT_TIMEOUT_S = (CONNECT_TIMEOUT_S, READ_TIMEOUT_S)
 
 
 def require_jitter_s(jitter_s: float) -> float:

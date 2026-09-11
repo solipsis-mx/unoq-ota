@@ -71,8 +71,17 @@ def default_client(region: str | None = None):
         raise S3Error(
             "S3 source requires botocore; install with: pip install 'unoq-ota[s3]'"
         ) from exc
+    from botocore.config import Config
+
+    from unoq_ota.sources.http_manifest import CONNECT_TIMEOUT_S, READ_TIMEOUT_S
+
     region = region or os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION")
-    kwargs = {}
+    kwargs = {
+        "config": Config(
+            connect_timeout=CONNECT_TIMEOUT_S,
+            read_timeout=READ_TIMEOUT_S,
+        )
+    }
     if region:
         kwargs["region_name"] = region
     return session.create_client("s3", **kwargs)

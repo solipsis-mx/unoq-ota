@@ -5,6 +5,7 @@ import pytest
 
 from unoq_ota.interfaces import Status
 from unoq_ota.jobs_runner import (
+    build_aws_jobs_client,
     default_mqtt_client_id,
     handle_execution,
     run_jobs_loop,
@@ -346,6 +347,56 @@ def test_ensure_plausible_clock_accepts_2026():
 
     ensure_plausible_clock(now=datetime(2026, 9, 9, tzinfo=timezone.utc))
 
+
+def test_build_aws_jobs_client_does_not_open_tls_when_clock_is_epoch(monkeypatch):
+    """A true 1970 CLOCK_REALTIME makes CRT MQTT fail TLS NotBefore (or hang).
+
+    Jobs must raise PreflightError *before* importing awsiotsdk / opening a
+    socket so systemd Restart=always can wait for NTP. Do not prove this by
+    yanks of CLOCK_REALTIME on a live truck.
+    """
+    from datetime import datetime, timezone
+
+    from unoq_ota.preflight import PreflightError
+    import unoq_ota.preflight as preflight
+
+    class FrozenDateTime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return datetime(1970, 1, 1, tzinfo=timezone.utc)
+
+    monkeypatch.setattr(preflight, "datetime", FrozenDateTime)
+
+    imported = []
+    real_import = __import__
+
+    def tracking_import(name, globals=None, locals=None, fromlist=(), level=0):
+        imported.append(name)
+        return real_import(name, globals, locals, fromlist, level)
+
+    monkeypatch.setattr("builtins.__import__", tracking_import)
+
+    with pytest.raises(PreflightError, match="1970"):
+        build_aws_jobs_client("ep", "c", "k", "ca", "board", "board-ota")
+
+    assert not any(name == "awscrt" or name == "awsiot" or name.startswith("awscrt.") or name.startswith("awsiot.") for name in imported)
+
+
+def test_build_aws_jobs_client_ensures_libc_dns_after_clock(monkeypatch):
+    order = []
+    monkeypatch.setattr(
+        "unoq_ota.jobs_runner.ensure_plausible_clock", lambda: order.append("clock")
+    )
+
+    def dns():
+        order.append("dns")
+        raise RuntimeError("stop-before-tls")
+
+    monkeypatch.setattr("unoq_ota.jobs_runner.ensure_libc_dns", dns)
+
+    with pytest.raises(RuntimeError, match="stop-before-tls"):
+        build_aws_jobs_client("ep", "c", "k", "ca", "board", "board-ota")
+    assert order == ["clock", "dns"]
 
 class _FakeFuture:
     def result(self):

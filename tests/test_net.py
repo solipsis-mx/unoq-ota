@@ -1,6 +1,12 @@
 from __future__ import annotations
 
-from unoq_ota.net import default_route_iface, iface_kind, parse_default_routes
+from unoq_ota.net import (
+    default_route_gateway,
+    default_route_iface,
+    iface_kind,
+    ipv4_from_proc_hex,
+    parse_default_routes,
+)
 
 _BOTH = """\
 Iface	Destination	Gateway 	Flags	RefCnt	Use	Metric	Mask		MTU	Window	IRTT
@@ -32,3 +38,23 @@ def test_usb0_prefix_is_cellular_before_rename():
 
 def test_wlan_is_wifi_without_a_driver():
     assert iface_kind("wlan0", None) == "wifi"
+
+
+def test_proc_hex_gateway_is_little_endian_dotted_quad():
+    assert ipv4_from_proc_hex("01E1A8C0") == "192.168.225.1"
+    assert ipv4_from_proc_hex("0144A8C0") == "192.168.68.1"
+
+
+def test_default_route_gateway_follows_lowest_metric():
+    assert default_route_gateway(_BOTH) == "192.168.68.1"
+
+
+_CELLULAR_ONLY = """\
+Iface	Destination	Gateway 	Flags	RefCnt	Use	Metric	Mask		MTU	Window	IRTT
+enxe6decdc549e4	00000000	01E1A8C0	0003	0	0	100	00000000	0	0	0
+"""
+
+
+def test_cellular_only_gateway_is_the_ecm_router():
+    assert default_route_gateway(_CELLULAR_ONLY) == "192.168.225.1"
+    assert default_route_iface(_CELLULAR_ONLY) == "enxe6decdc549e4"

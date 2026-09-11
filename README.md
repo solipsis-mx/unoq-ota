@@ -185,6 +185,27 @@ standard credential chain at it instead of a static access key:
 `unoq-ota run --source s3 ...` will pick this up with no other change --
 `S3PresignedSource` already builds its client from the standard chain.
 
+## Cellular fetches and libc DNS
+
+HTTP and S3 downloads use a `(30, 180)` second `(connect, read)` timeout so a
+weak cellular link can finish a payload under `MAX_PAYLOAD_BYTES`. A 30 s
+combined timeout was too short for that path.
+
+When the default route is cellular and `/etc/resolv.conf` still lists
+off-link RFC1918 nameservers (typical after wifi-down: NetworkManager
+rewrites the file on disconnect, so writing *before* wifi-off is useless),
+`unoq-ota jobs` and `unoq-ota run` rewrite it to the default-route gateway
+plus `8.8.8.8`. If the process cannot write the file, it logs and continues.
+Run the helper as root (or `ExecStartPre=` on the unit) when the agent
+itself is unprivileged:
+
+```bash
+unoq-ota-ensure-dns
+```
+
+`--gate cellular-signal` logs `fetch allowed: quality=<n> min=<n>` on the
+allow path as well as `fetch gated:` on refuse.
+
 ## Running on a board
 
 ```bash

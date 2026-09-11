@@ -97,6 +97,7 @@ class Agent:
         host_dir: Path | None = None,
         host_max_bytes: int = MAX_PAYLOAD_BYTES,
         no_flash: bool = False,
+        ensure_dns=None,
     ):
         if fetch is None:
             # A missing `fetch` is a construction mistake, not a runtime
@@ -124,6 +125,11 @@ class Agent:
         self.host_dir = Path(host_dir) if host_dir is not None else self.state_dir / "host"
         self.host_max_bytes = host_max_bytes
         self.no_flash = no_flash
+        if ensure_dns is None:
+            from unoq_ota.dns import ensure_libc_dns
+
+            ensure_dns = ensure_libc_dns
+        self._ensure_dns = ensure_dns
         self.store = StateStore(self.state_dir / "state.json")
 
     def _default_verify(self, manifest: dict, path: Path, last_sequence: int) -> None:
@@ -282,6 +288,10 @@ class Agent:
             (self.state_dir / name).unlink(missing_ok=True)
 
     def run_once(self) -> Phase:
+        try:
+            self._ensure_dns()
+        except Exception as exc:  # noqa: BLE001 - DNS repair must not abort a cycle
+            log.warning("ensure_dns failed: %s", exc)
         update = self.source.check()
         if update is None:
             return Phase.IDLE
@@ -392,6 +402,7 @@ class Agent:
                 self.source.report(update, Status.WAITING_FOR_GATE, reason)
                 self._set(Phase.IDLE, clear_version=True)
                 return Phase.IDLE
+            log.info("fetch allowed: %s", reason)
 
         self._set(Phase.DOWNLOADING, update.version)
         self.source.report(update, Status.DOWNLOADING, "fetching artifact")

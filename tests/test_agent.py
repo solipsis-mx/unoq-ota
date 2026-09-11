@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import contextlib
 import hashlib
+import logging
 import os
 from pathlib import Path
 
@@ -75,7 +76,7 @@ class StubFetchGate:
         self.fetch_checks += 1
         return (
             self.fetch_allowed,
-            "ok" if self.fetch_allowed else "quality=60 min=100",
+            "quality=60 min=20" if self.fetch_allowed else "quality=60 min=100",
         )
 
 
@@ -161,7 +162,7 @@ def _update(version="1.0.0", sequence=1):
 
 
 def _agent(
-    tmp_path, source, gate, health, flashed=None, verify_ok=True, health_factory=None, verify_error=None, no_flash=False, fetch=None
+    tmp_path, source, gate, health, flashed=None, verify_ok=True, health_factory=None, verify_error=None, no_flash=False, fetch=None, ensure_dns=None
 ):
     def default_fetch(url, dest):
         Path(dest).write_bytes(make_artifact_bytes())
@@ -177,6 +178,10 @@ def _agent(
         if not verify_ok:
             raise VerificationError("bad signature")
 
+    kwargs = {}
+    if ensure_dns is not None:
+        kwargs["ensure_dns"] = ensure_dns
+
     return Agent(
         state_dir=tmp_path,
         source=source,
@@ -188,6 +193,7 @@ def _agent(
         verify=verify,
         router_stopped=_fake_router_stopped,
         no_flash=no_flash,
+        **kwargs,
     )
 
 
@@ -233,6 +239,31 @@ def test_fetch_gate_refuses_before_download(tmp_path):
     assert Status.WAITING_FOR_GATE in [s for s, _ in source.reports]
     assert not StateStore(tmp_path / "state.json").is_poisoned("1.0.0")
     assert gate.fetch_checks == 1
+
+
+def test_fetch_gate_allow_logs_quality(tmp_path, caplog):
+    caplog.set_level(logging.INFO)
+    source = StubSource(_update(sequence=2))
+    gate = StubFetchGate(fetch_allowed=True)
+    agent = _agent(tmp_path, source, gate, StubHealth([True]), flashed=[])
+    agent.run_once()
+    assert any("fetch allowed:" in rec.getMessage() and "quality=60" in rec.getMessage() for rec in caplog.records)
+
+
+def test_run_once_ensures_dns_before_manifest_check(tmp_path):
+    seen = []
+
+    class Src:
+        def check(self):
+            seen.append("check")
+            return None
+
+        def report(self, *args):
+            pass
+
+    agent = _agent(tmp_path, Src(), StubGate(), StubHealth([]), ensure_dns=lambda: seen.append("dns"))
+    assert agent.run_once() == Phase.IDLE
+    assert seen == ["dns", "check"]
 
 
 def test_fetch_gate_not_called_when_watermark_skips(tmp_path):
