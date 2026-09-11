@@ -6,7 +6,11 @@ from pathlib import Path
 import pytest
 
 from unoq_ota.interfaces import Status
-from unoq_ota.sources.http_manifest import HttpManifestSource, download
+from unoq_ota.sources.http_manifest import (
+    DEFAULT_TIMEOUT_S,
+    HttpManifestSource,
+    download,
+)
 from unoq_ota.sources.local import LocalFileSource
 
 
@@ -140,8 +144,10 @@ class _FakeManifestSession:
     def __init__(self, response=None, exc=None):
         self._response = response
         self._exc = exc
+        self.timeout = None
 
     def get(self, url, timeout=None):
+        self.timeout = timeout
         if self._exc:
             raise self._exc
         return self._response
@@ -266,8 +272,10 @@ class _FakeStreamResponse:
 class _FakeStreamSession:
     def __init__(self, response):
         self._response = response
+        self.timeout = None
 
     def get(self, url, stream=True, timeout=None):
+        self.timeout = timeout
         return self._response
 
 
@@ -333,3 +341,24 @@ def test_download_propagates_original_exception_when_unlink_also_fails(tmp_path,
 
     with pytest.raises(ConnectionError):
         download("http://example.invalid/artifact.bin", dest, session=session)
+
+
+def test_http_download_uses_a_long_read_timeout_for_cellular(tmp_path):
+    dest = tmp_path / "artifact.bin"
+    session = _FakeStreamSession(_FakeStreamResponse([b"ok"]))
+
+    download("http://example.invalid/artifact.bin", dest, session=session)
+
+    assert session.timeout == DEFAULT_TIMEOUT_S
+    assert DEFAULT_TIMEOUT_S == (30.0, 180.0)
+
+
+def test_http_manifest_check_uses_the_same_timeout():
+    session = _FakeManifestSession(
+        _FakeManifestResponse(content=json.dumps(_manifest()).encode())
+    )
+    HttpManifestSource(
+        "http://example.invalid/manifest.json", session=session, jitter_s=0
+    ).check()
+
+    assert session.timeout == DEFAULT_TIMEOUT_S

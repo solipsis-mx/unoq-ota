@@ -27,7 +27,9 @@ unknown.
 | S3 source (`--source s3`) | Implemented; mints GET URLs at fetch time. Not yet hardware-proven |
 | systemd poller | Bench-proven: stock unit + drop-in, unattended coupled cycles, replay refusal |
 | Daily verify-only timer | `unoq-ota.timer` + `--once --no-flash`; sequence watermark skip |
-| AWS IoT Jobs poke | Shipped (`unoq-ota jobs`); MQTT `connect().result(timeout=30)` + `MQTT connected`; `ensure_plausible_clock` before connect so an epoch clock exits 1 for systemd restart |
+| AWS IoT Jobs poke | Shipped (`unoq-ota jobs`); MQTT `connect().result(timeout=30)` + `MQTT connected`; `ensure_plausible_clock` before connect so an epoch clock exits 1 for systemd restart; `ensure_libc_dns` after clock, before TLS |
+| Fetch timeouts | HTTP/S3 `(connect, read) = (30, 180)` s |
+| Cellular libc DNS | Rewrites `/etc/resolv.conf` when default route is cellular and nameservers are off-link LAN; `unoq-ota-ensure-dns` |
 | Router-stop guard | Bench-proven after the irreversible-stop fix; dependents restored |
 | Boot reconciler | Implemented; mid-erase brick + **systemd** boot recovery proven |
 | Optional `host_payload` | **Hardware-proven 2026-09-05**: coupled apply, and rollback of host tree + MCU on a forced host-health failure |
@@ -36,7 +38,7 @@ unknown.
 | `AlwaysGate` / `CellularSignalGate` | Shipped gates (`--gate always` default; `cellular-signal` for MM+route fetch gating). Do not add a product-specific gate here |
 | Agent self-update / rootfs / Zephyr core | Out of scope forever as currently designed |
 
-385 tests passing (`python3 -m pytest tests/ -q`).
+445 tests passing (`python3 -m pytest tests/ -q`).
 
 ## Commands
 
@@ -83,6 +85,7 @@ unoq_ota/
   health/version_report.py   TCP 127.0.0.1:7500, not arduino-app-cli monitor
   sources/        local, http_manifest, s3_presigned, reporting wrapper
   jobs_runner.py  IoT Jobs poke (verify-only; not an UpdateSource)
+  dns.py          libc resolv.conf repair when cellular default has off-link LAN DNS
   gates/always.py
 systemd/          reconcile (mandatory) + poller/timer/jobs (drop-in for flags)
 tools/            keygen, sign-artifact, bench-http
@@ -166,6 +169,10 @@ optional unit restart/is-active. Any failure rolls **host then MCU**. Omit
   with no broker session. `ensure_plausible_clock` runs before that connect
   (`check_clock` year floor 2020); an epoch clock is `PreflightError` and
   `jobs` exits 1 so systemd can retry after NTP or last-known-time persist.
+  Do not prove TLS NotBefore by setting CLOCK_REALTIME to 1970 on a live
+  board — `test_build_aws_jobs_client_does_not_open_tls_when_clock_is_epoch`
+  locks that the CRT import never happens. `ensure_libc_dns` runs after the
+  clock check so wifi-down leaving LAN nameservers cannot DNS-fail MQTT.
 
 ## Where to continue
 

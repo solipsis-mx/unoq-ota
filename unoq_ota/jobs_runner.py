@@ -25,12 +25,24 @@ MQTT_CONNECT_TIMEOUT_S = 30.0
 def ensure_plausible_clock(now=None) -> None:
     """Refuse Jobs MQTT when the clock cannot validate TLS or signatures.
 
-    Raises PreflightError so systemd Restart=always can retry after NTP
-    or last-known-time persist. No sleep loop — the unit recycles.
+    A 1970-epoch CLOCK_REALTIME makes CRT mTLS fail (cert NotBefore) or hang.
+    Raise PreflightError *before* importing awsiotsdk so systemd Restart=always
+    can retry after NTP. Do not prove this by setting the clock on a live board.
     """
     from unoq_ota.preflight import check_clock
 
     check_clock(now=now)
+
+
+def ensure_libc_dns() -> str:
+    """Rewrite libc DNS after wifi-down if LAN nameservers are off-link.
+
+    Imported lazily so unit tests can monkeypatch this name on jobs_runner
+    without importing awsiotsdk.
+    """
+    from unoq_ota.dns import ensure_libc_dns as _ensure
+
+    return _ensure()
 
 
 class JobExecution(Protocol):
@@ -194,6 +206,7 @@ def build_aws_jobs_client(
     """Construct the awsiotsdk Jobs client. Imported only at call time."""
     require_distinct_mqtt_client_id(thing_name, client_id)
     ensure_plausible_clock()
+    ensure_libc_dns()
     try:
         from awscrt import mqtt
         from awsiot import iotjobs, mqtt_connection_builder

@@ -18,6 +18,7 @@ from unoq_ota.sources.s3_presigned import (
     DEFAULT_EXPIRES_S,
     S3Error,
     S3PresignedSource,
+    default_client,
     download_s3,
     parse_s3_uri,
     presign_get,
@@ -276,3 +277,25 @@ def test_jitter_validation_matches_the_http_source():
         HttpManifestSource("http://example.invalid/m.json", jitter_s=float("inf"))
     with pytest.raises(ValueError, match="jitter"):
         S3PresignedSource("s3://updates/m.json", jitter_s=float("inf"))
+
+
+def test_s3_default_client_uses_the_http_read_timeout(monkeypatch):
+    from unoq_ota.sources.http_manifest import DEFAULT_TIMEOUT_S
+
+    seen = {}
+
+    class FakeSession:
+        def create_client(self, service, **kwargs):
+            seen["service"] = service
+            seen.update(kwargs)
+            return object()
+
+    monkeypatch.setattr(
+        "unoq_ota.sources.s3_presigned._botocore_session", lambda: FakeSession()
+    )
+    default_client(region="us-east-2")
+
+    assert seen["service"] == "s3"
+    connect_s, read_s = DEFAULT_TIMEOUT_S
+    assert seen["config"].connect_timeout == connect_s
+    assert seen["config"].read_timeout == read_s
