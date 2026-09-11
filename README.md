@@ -133,6 +133,8 @@ collects them from TCP `127.0.0.1:7500` (the router packet path), not from
 
 The private key never goes on a device.
 
+### PEM key mode
+
 ```bash
 tools/keygen.py --key-id bench --out-dir /path/to/keys
 # copies to the device:  /etc/unoq-ota/keys/bench.public.b64
@@ -146,12 +148,42 @@ tools/sign-artifact.py sketch.bin --version 1.0.0 --sequence 1 \
 #   --host-payload app.tar.gz --host-url https://example.com/app.tar.gz
 ```
 
+### AWS KMS mode
+
+```bash
+tools/sign-artifact.py sketch.bin --version 1.0.0 --sequence 1 \
+  --url s3://your-bucket/releases/v1.0.0/artifact.bin \
+  --kms-key-id alias/your-ota-signing-key --kms-region us-east-2 \
+  --key-id kms-2026 --out manifest.json
+# requires: pip install 'unoq-ota[s3]'  (botocore)
+# requires: AWS credentials in the standard chain with kms:Sign on that key
+```
+
 `--out` writes the manifest to a file. Without it, the JSON goes to stdout
 and progress goes to stderr, so `sign-artifact.py ... > manifest.json` still
 produces a valid document.
 
 `tools/bench-http.py` serves a directory and accepts `POST /events`, so a
 bench can exercise the whole pull path without a cloud account.
+
+## Using an IoT role alias for S3 credentials (`--source s3`)
+
+If your device already has an IoT mutual-TLS certificate (e.g. for IoT
+Jobs) and an IoT role alias granting S3 access, point botocore's
+standard credential chain at it instead of a static access key:
+
+    # ~/.aws/config on the device
+    [default]
+    credential_process = unoq-ota-iot-credentials \
+      --endpoint your-account-credentials.iot.us-east-2.amazonaws.com \
+      --role-alias your-role-alias \
+      --thing-name your-thing-name \
+      --cert /etc/unoq-ota/device.cert.pem \
+      --key /etc/unoq-ota/device.key.pem \
+      --ca /etc/unoq-ota/AmazonRootCA1.pem
+
+`unoq-ota run --source s3 ...` will pick this up with no other change --
+`S3PresignedSource` already builds its client from the standard chain.
 
 ## Running on a board
 

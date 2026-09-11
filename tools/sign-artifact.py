@@ -15,6 +15,7 @@ from cryptography.hazmat.primitives import serialization
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from unoq_ota.artifact import ArtifactError, load_artifact  # noqa: E402
+from unoq_ota.kms_sign import KmsSignError, default_kms_client, sign_with_kms  # noqa: E402
 from unoq_ota.verify import canonical_bytes                 # noqa: E402
 
 
@@ -50,7 +51,17 @@ def main() -> int:
     parser.add_argument("--version", required=True)
     parser.add_argument("--sequence", type=int, required=True)
     parser.add_argument("--url", required=True)
-    parser.add_argument("--private-key", type=Path, required=True)
+    parser.add_argument("--private-key", type=Path, default=None)
+    parser.add_argument(
+        "--kms-key-id",
+        default=None,
+        help="AWS KMS KeyId/ARN/alias to sign with (alternative to --private-key)",
+    )
+    parser.add_argument(
+        "--kms-region",
+        default=None,
+        help="AWS region for --kms-key-id (also reads AWS_REGION)",
+    )
     parser.add_argument("--key-id", required=True)
     parser.add_argument(
         "--out",
@@ -79,6 +90,9 @@ def main() -> int:
         help="URL devices will fetch the host payload from (required with --host-payload)",
     )
     args = parser.parse_args()
+
+    if bool(args.private_key) == bool(args.kms_key_id):
+        raise SystemExit("exactly one of --private-key or --kms-key-id is required")
 
     # Validate before signing: never sign an artifact that would be refused.
     # Caught here rather than left to propagate -- a bad artifact path or a
@@ -127,18 +141,31 @@ def main() -> int:
     if args.expires is not None:
         manifest["expires"] = _require_utc_qualified(args.expires, "expires")
 
-    try:
-        key = serialization.load_pem_private_key(
-            args.private_key.read_bytes(), password=None
-        )
-    except OSError as exc:
-        raise SystemExit(f"cannot read --private-key {args.private_key}: {exc}")
-    except ValueError as exc:
-        raise SystemExit(f"cannot load --private-key {args.private_key}: {exc}")
+    payload = canonical_bytes(manifest)
+    if args.kms_key_id:
+        try:
+            client = default_kms_client(args.kms_region)
+        except KmsSignError as exc:
+            raise SystemExit(f"cannot build KMS client: {exc}")
+        try:
+            signature = sign_with_kms(client, args.kms_key_id, payload)
+        except KmsSignError as exc:
+            raise SystemExit(f"KMS signing failed: {exc}")
+    else:
+        try:
+            key = serialization.load_pem_private_key(
+                args.private_key.read_bytes(), password=None
+            )
+        except OSError as exc:
+            raise SystemExit(f"cannot read --private-key {args.private_key}: {exc}")
+        except ValueError as exc:
+            raise SystemExit(f"cannot load --private-key {args.private_key}: {exc}")
+        signature = key.sign(payload)
+
     manifest["signature"] = {
         "alg": "ed25519",
         "key_id": args.key_id,
-        "sig": base64.b64encode(key.sign(canonical_bytes(manifest))).decode(),
+        "sig": base64.b64encode(signature).decode(),
     }
 
     document = json.dumps(manifest, indent=2) + "\n"

@@ -26,6 +26,7 @@ dev = ["pytest>=7.0"]
 
 [project.scripts]
 unoq-ota = "unoq_ota.cli:main"
+unoq-ota-iot-credentials = "unoq_ota.iot_credentials:main"
 
 [build-system]
 requires = ["setuptools>=61"]

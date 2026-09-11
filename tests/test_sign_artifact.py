@@ -17,6 +17,7 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from tests.conftest import make_artifact_bytes
+from unoq_ota.kms_sign import KmsSignError
 from unoq_ota.verify import verify_manifest
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -122,3 +123,91 @@ def test_host_payload_digest_is_covered_by_the_signature(tmp_path, monkeypatch):
     manifest["host_payload"]["sha256"] = "0" * 64
     with pytest.raises(Exception):
         verify_manifest(manifest, keys, last_sequence=0, artifact_path=artifact)
+
+
+def test_kms_mode_signs_via_kms_instead_of_a_local_key(tmp_path, monkeypatch):
+    tool = _load_tool()
+    artifact = tmp_path / "sketch.bin"
+    artifact.write_bytes(make_artifact_bytes())
+    out = tmp_path / "manifest.json"
+
+    kms_key = Ed25519PrivateKey.generate()
+    calls = []
+
+    def fake_sign_with_kms(client, key_id, payload):
+        calls.append((client, key_id, payload))
+        return kms_key.sign(payload)
+
+    monkeypatch.setattr(tool, "default_kms_client", lambda region=None: "fake-client")
+    monkeypatch.setattr(tool, "sign_with_kms", fake_sign_with_kms)
+
+    argv = [
+        str(artifact),
+        "--version", "1.0.0",
+        "--sequence", "1",
+        "--url", "http://example.invalid/sketch.bin",
+        "--kms-key-id", "alias/ota-signing",
+        "--kms-region", "us-east-2",
+        "--key-id", "kms-2026",
+        "--out", str(out),
+    ]
+    monkeypatch.setattr(sys, "argv", ["sign-artifact.py", *argv])
+    assert tool.main() == 0
+
+    assert calls[0][0] == "fake-client"
+    assert calls[0][1] == "alias/ota-signing"
+    manifest = json.loads(out.read_text())
+    verify_manifest(
+        manifest, {"kms-2026": kms_key.public_key()}, last_sequence=0, artifact_path=artifact
+    )
+
+
+def test_requires_exactly_one_of_private_key_or_kms_key_id(tmp_path, monkeypatch):
+    tool = _load_tool()
+    artifact = tmp_path / "sketch.bin"
+    artifact.write_bytes(make_artifact_bytes())
+
+    argv = [
+        str(artifact),
+        "--version", "1.0.0",
+        "--sequence", "1",
+        "--url", "http://example.invalid/sketch.bin",
+        "--key-id", "k",
+    ]
+    monkeypatch.setattr(sys, "argv", ["sign-artifact.py", *argv])
+    with pytest.raises(SystemExit, match="exactly one"):
+        tool.main()
+
+
+def test_rejects_both_private_key_and_kms_key_id(tmp_path, monkeypatch):
+    tool = _load_tool()
+    key_path, artifact, _ = _bench(tmp_path)
+
+    argv = _argv(artifact, key_path) + ["--kms-key-id", "alias/ota-signing"]
+    monkeypatch.setattr(sys, "argv", ["sign-artifact.py", *argv])
+    with pytest.raises(SystemExit, match="exactly one"):
+        tool.main()
+
+
+def test_kms_signing_failure_is_a_clean_systemexit(tmp_path, monkeypatch):
+    tool = _load_tool()
+    artifact = tmp_path / "sketch.bin"
+    artifact.write_bytes(make_artifact_bytes())
+
+    def boom(client, key_id, payload):
+        raise KmsSignError("kms:Sign returned no usable Signature: None")
+
+    monkeypatch.setattr(tool, "default_kms_client", lambda region=None: "fake-client")
+    monkeypatch.setattr(tool, "sign_with_kms", boom)
+
+    argv = [
+        str(artifact),
+        "--version", "1.0.0",
+        "--sequence", "1",
+        "--url", "http://example.invalid/sketch.bin",
+        "--kms-key-id", "alias/ota-signing",
+        "--key-id", "kms-2026",
+    ]
+    monkeypatch.setattr(sys, "argv", ["sign-artifact.py", *argv])
+    with pytest.raises(SystemExit, match="KMS signing failed"):
+        tool.main()
