@@ -1,9 +1,11 @@
-"""An s3:// manifest polled by minting a short-lived GET URL each cycle.
+"""An s3:// manifest polled with botocore GetObject each cycle.
 
 A presigned HTTPS URL pasted into a unit file expires, after which every poll
-is a 403. This source keeps the object identity (`s3://bucket/key`) and signs
-at fetch time from the standard AWS credential chain. Artifact URLs in the
-manifest can be `s3://` as well -- `download_s3` mints a GET for those too.
+is a 403. Fetching via a presigned URL that `requests` then GETs also breaks
+under IoT role-alias credentials: the session token in the query string does
+not survive round-trip encoding (`SignatureDoesNotMatch`), while the same
+principal's `get_object` succeeds. This source keeps the object identity
+(`s3://bucket/key`) and reads through the standard AWS credential chain.
 
 Requires `pip install unoq-ota[s3]` (botocore). Tests inject a fake client;
 nothing here talks to AWS on its own.
@@ -11,6 +13,7 @@ nothing here talks to AWS on its own.
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import random
@@ -18,8 +21,9 @@ import time
 from pathlib import Path
 from urllib.parse import urlsplit
 
+from unoq_ota.interfaces import Status, Update
 from unoq_ota.preflight import MAX_PAYLOAD_BYTES
-from unoq_ota.sources.http_manifest import HttpManifestSource, download, require_jitter_s
+from unoq_ota.sources.http_manifest import require_jitter_s
 
 log = logging.getLogger(__name__)
 
@@ -97,32 +101,52 @@ def download_s3(
     dest: Path,
     *,
     client=None,
-    session=None,
+    session=None,  # noqa: ARG001 -- kept so callers that passed the HTTP session stay valid
     max_bytes: int = MAX_PAYLOAD_BYTES,
-    expires_in: int = DEFAULT_EXPIRES_S,
+    expires_in: int = DEFAULT_EXPIRES_S,  # noqa: ARG001 -- unused; GetObject has no URL TTL
     region: str | None = None,
 ) -> Path:
-    """Presign `s3://bucket/key` and stream it through the HTTP downloader."""
+    """`s3://bucket/key` via GetObject, streamed to disk with a hard size cap."""
     bucket, key = parse_s3_uri(uri)
-    url = presign_get(
-        bucket, key, expires_in=expires_in, client=client, region=region
-    )
-    return download(url, dest, session=session, max_bytes=max_bytes)
+    dest = Path(dest)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    written = 0
+    try:
+        s3 = client or default_client(region)
+        response = s3.get_object(Bucket=bucket, Key=key)
+        body = response["Body"]
+        with dest.open("wb") as handle:
+            while True:
+                chunk = body.read(65536)
+                if not chunk:
+                    break
+                written += len(chunk)
+                if written > max_bytes:
+                    raise ValueError(f"artifact exceeded {max_bytes} bytes")
+                handle.write(chunk)
+    except Exception:
+        try:
+            dest.unlink(missing_ok=True)
+        except OSError as cleanup_exc:
+            log.warning(
+                "failed to remove partial download at %s: %s", dest, cleanup_exc
+            )
+        raise
+    return dest
 
 
 class S3PresignedSource:
     """Like HttpManifestSource, but the poll target is an s3:// object identity.
 
-    Jitter runs *before* presign so a stampede delay cannot eat the URL's
-    TTL. check() never raises on transient failure -- same contract as the
-    other sources.
+    Jitter runs before GetObject so a fleet does not stampede. check() never
+    raises on transient failure -- same contract as the other sources.
     """
 
     def __init__(
         self,
         manifest_url: str,
         poisoned=None,
-        session=None,
+        session=None,  # noqa: ARG001 -- kept for call-site compatibility
         jitter_s: float = 30.0,
         *,
         s3_client=None,
@@ -133,7 +157,6 @@ class S3PresignedSource:
         self.manifest_url = manifest_url
         self.jitter_s = require_jitter_s(jitter_s)
         self._poisoned = poisoned or (lambda version: False)
-        self._session = session
         self._s3_client = s3_client
         self.expires_in = expires_in
         self.region = region
@@ -146,23 +169,28 @@ class S3PresignedSource:
             log.warning("jitter sleep failed: %s", exc)
             return None
         try:
-            http_url = presign_get(
-                self.bucket,
-                self.key,
-                expires_in=self.expires_in,
-                client=self._s3_client,
-                region=self.region,
-            )
+            s3 = self._s3_client or default_client(self.region)
+            response = s3.get_object(Bucket=self.bucket, Key=self.key)
+            raw = response["Body"].read()
+            manifest = json.loads(raw)
+            version = str(manifest["version"])
+            sequence = int(manifest["sequence"])
         except Exception as exc:
-            log.warning("s3 presign failed: %s", exc)
+            log.warning("manifest fetch failed: %s", exc)
             return None
-        inner = HttpManifestSource(
-            http_url,
-            poisoned=self._poisoned,
-            session=self._session,
-            jitter_s=0,
+
+        try:
+            poisoned = self._poisoned(version)
+        except Exception as exc:
+            log.warning("poison-list check failed for version %s: %s", version, exc)
+            return None
+
+        if poisoned:
+            return None
+
+        return Update(
+            version=version, sequence=sequence, manifest=manifest, raw_manifest=raw
         )
-        return inner.check()
 
     def report(self, update, status, detail: str) -> None:
         log.info("update %s -> %s (%s)", update.version, status.value, detail)

@@ -34,10 +34,26 @@ def _manifest(version="1.0.0", sequence=1):
     }
 
 
+class _FakeBody:
+    def __init__(self, data: bytes):
+        self._buf = data
+        self._off = 0
+
+    def read(self, amt=None):
+        if amt is None:
+            chunk = self._buf[self._off :]
+            self._off = len(self._buf)
+            return chunk
+        chunk = self._buf[self._off : self._off + amt]
+        self._off += len(chunk)
+        return chunk
+
+
 class FakeS3Client:
-    def __init__(self, url="https://example.invalid/presigned", exc=None):
+    def __init__(self, url="https://example.invalid/presigned", exc=None, body=b""):
         self.url = url
         self.exc = exc
+        self.body = body
         self.calls = []
 
     def generate_presigned_url(self, ClientMethod, Params=None, ExpiresIn=None, HttpMethod=None):
@@ -52,6 +68,12 @@ class FakeS3Client:
         if self.exc is not None:
             raise self.exc
         return self.url
+
+    def get_object(self, Bucket, Key):
+        self.calls.append({"op": "get_object", "Bucket": Bucket, "Key": Key})
+        if self.exc is not None:
+            raise self.exc
+        return {"Body": _FakeBody(self.body), "ContentLength": len(self.body)}
 
 
 class _FakeManifestResponse:
@@ -146,23 +168,14 @@ def test_presign_get_without_botocore_names_the_extra(monkeypatch):
         presign_get("updates", "manifest.json")
 
 
-def test_download_s3_presigns_then_uses_the_http_downloader(monkeypatch, tmp_path):
-    client = FakeS3Client(url="https://example.invalid/a.bin?X-Amz-Signature=1")
+def test_download_s3_get_objects_then_writes_the_file(tmp_path):
+    client = FakeS3Client(body=b"payload")
     dest = tmp_path / "out.bin"
-    seen = []
-
-    def fake_download(url, dest_path, session=None, max_bytes=None):
-        seen.append((url, dest_path, max_bytes))
-        dest_path.write_bytes(b"payload")
-        return dest_path
-
-    monkeypatch.setattr("unoq_ota.sources.s3_presigned.download", fake_download)
 
     download_s3("s3://updates/a.bin", dest, client=client, max_bytes=123)
 
     assert dest.read_bytes() == b"payload"
-    assert seen == [("https://example.invalid/a.bin?X-Amz-Signature=1", dest, 123)]
-    assert client.calls[0]["Params"] == {"Bucket": "updates", "Key": "a.bin"}
+    assert client.calls == [{"op": "get_object", "Bucket": "updates", "Key": "a.bin"}]
 
 
 # ---------------------------------------------------------------------------
@@ -180,14 +193,10 @@ def test_construction_rejects_a_negative_jitter():
         S3PresignedSource("s3://updates/manifest.json", jitter_s=-5)
 
 
-def test_check_presigns_then_fetches_the_minted_url():
-    client = FakeS3Client(url="https://example.invalid/presigned")
-    session = _FakeManifestSession(
-        _FakeManifestResponse(content=json.dumps(_manifest()).encode())
-    )
+def test_check_get_objects_the_manifest():
+    client = FakeS3Client(body=json.dumps(_manifest()).encode())
     source = S3PresignedSource(
         "s3://updates/manifest.json",
-        session=session,
         s3_client=client,
         jitter_s=0,
     )
@@ -197,32 +206,26 @@ def test_check_presigns_then_fetches_the_minted_url():
     assert update is not None
     assert update.version == "1.0.0"
     assert update.sequence == 1
-    assert session.urls == ["https://example.invalid/presigned"]
-    assert client.calls[0]["ExpiresIn"] == DEFAULT_EXPIRES_S
+    assert client.calls == [
+        {"op": "get_object", "Bucket": "updates", "Key": "manifest.json"}
+    ]
 
 
-def test_check_returns_none_when_presign_fails():
+def test_check_returns_none_when_get_object_fails():
     client = FakeS3Client(exc=RuntimeError("ExpiredToken"))
-    session = _FakeManifestSession(
-        _FakeManifestResponse(content=json.dumps(_manifest()).encode())
-    )
     source = S3PresignedSource(
         "s3://updates/manifest.json",
-        session=session,
         s3_client=client,
         jitter_s=0,
     )
 
     assert source.check() is None
-    assert session.urls == []
 
 
 def test_check_returns_none_on_fetch_failure():
-    client = FakeS3Client()
-    session = _FakeManifestSession(exc=ConnectionError("no route to host"))
+    client = FakeS3Client(exc=ConnectionError("no route to host"))
     source = S3PresignedSource(
         "s3://updates/manifest.json",
-        session=session,
         s3_client=client,
         jitter_s=0,
     )
@@ -231,14 +234,10 @@ def test_check_returns_none_on_fetch_failure():
 
 
 def test_check_skips_a_poisoned_version():
-    client = FakeS3Client()
-    session = _FakeManifestSession(
-        _FakeManifestResponse(content=json.dumps(_manifest(version="bad")).encode())
-    )
+    client = FakeS3Client(body=json.dumps(_manifest(version="bad")).encode())
     source = S3PresignedSource(
         "s3://updates/manifest.json",
         poisoned=lambda v: v == "bad",
-        session=session,
         s3_client=client,
         jitter_s=0,
     )
@@ -247,14 +246,10 @@ def test_check_skips_a_poisoned_version():
 
 
 def test_check_returns_none_when_poisoned_predicate_raises():
-    client = FakeS3Client()
-    session = _FakeManifestSession(
-        _FakeManifestResponse(content=json.dumps(_manifest()).encode())
-    )
+    client = FakeS3Client(body=json.dumps(_manifest()).encode())
     source = S3PresignedSource(
         "s3://updates/manifest.json",
         poisoned=lambda v: (_ for _ in ()).throw(OSError("state.json unreadable")),
-        session=session,
         s3_client=client,
         jitter_s=0,
     )
@@ -263,13 +258,9 @@ def test_check_returns_none_when_poisoned_predicate_raises():
 
 
 def test_report_does_not_raise():
-    client = FakeS3Client()
-    session = _FakeManifestSession(
-        _FakeManifestResponse(content=json.dumps(_manifest()).encode())
-    )
+    client = FakeS3Client(body=json.dumps(_manifest()).encode())
     source = S3PresignedSource(
         "s3://updates/manifest.json",
-        session=session,
         s3_client=client,
         jitter_s=0,
     )
